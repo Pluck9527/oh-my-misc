@@ -258,7 +258,7 @@ class _Arc4:
             self.s[self.i] = self.s[self.j]
             self.s[self.j] = si
 
-    def clone(self) -> "_Arc4":
+    def clone(self) -> _Arc4:
         other = object.__new__(_Arc4)
         other.s = self.s.copy()
         other.i = self.i
@@ -287,10 +287,9 @@ class _Iterator:
         else:
             multiplier = 2.0 - ((bits / 32) - remaining) / (bits / 32)
         self.skipmod = int(multiplier * remaining / (8 * datalen))
-        if self.skipmod < 1:
-            self.skipmod = 1
+        self.skipmod = max(self.skipmod, 1)
 
-    def clone(self) -> "_Iterator":
+    def clone(self) -> _Iterator:
         other = object.__new__(_Iterator)
         other.skipmod = self.skipmod
         other.as_ = self.as_.clone()

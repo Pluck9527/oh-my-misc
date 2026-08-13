@@ -57,9 +57,8 @@ class StegoCliNamespaceTest(unittest.TestCase):
     def test_stego_help_keeps_only_cross_carrier_tools(self) -> None:
         parser = main.__globals__["build_parser"]()
         stdout = io.StringIO()
-        with contextlib.redirect_stdout(stdout):
-            with self.assertRaises(SystemExit) as context:
-                parser.parse_args(["stego", "--help"])
+        with contextlib.redirect_stdout(stdout), self.assertRaises(SystemExit) as context:
+            parser.parse_args(["stego", "--help"])
         help_text = stdout.getvalue()
 
         self.assertEqual(context.exception.code, 0)
