@@ -11,8 +11,10 @@ requires-python = ">=3.11"
 license = { text = "GPL-3.0-only" }
 authors = [{ name = "oh-my-misc contributors" }]
 dependencies = [
+  "cryptography>=50.0.0",
   "numpy>=2.0",
   "Pillow>=11.0",
+  "pycryptodome>=3.23.0",
 ]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
@@ -27,6 +29,9 @@ classifiers = [
 omm = "oh_my_misc.cli:main"
 
 [project.optional-dependencies]
+raw = [
+  "rawpy>=0.25",
+]
 dev = [
   "pytest>=8.3",
   "pytest-cov>=6.0",
