@@ -7,6 +7,8 @@ import tarfile
 import zipfile
 from pathlib import Path
 
+import py7zr
+
 from oh_my_misc.cli import main
 from oh_my_misc.zip_nested import detect_archive_type, unpack_nested_archives
 
@@ -52,6 +54,28 @@ def test_unpack_mixed_tar_gz_and_gzip(tmp_path: Path) -> None:
     assert result.archives_processed == 3
     assert any(Path(path).name == "payload" for path in result.final_files)
     assert any(Path(path).read_bytes() == b"flag{gzip}" for path in map(Path, result.final_files))
+
+
+def test_unpack_7z_native_without_external_tool(tmp_path: Path) -> None:
+    payload = tmp_path / "payload.txt"
+    payload.write_bytes(b"flag{native_7z_nested}")
+    archive = tmp_path / "outer.7z"
+    output = tmp_path / "out"
+    ignored_sevenzip = tmp_path / "not-a-7z-binary"
+    ignored_sevenzip.write_text("ignored", encoding="utf-8")
+    with py7zr.SevenZipFile(archive, mode="w") as seven_zip:
+        seven_zip.write(payload, arcname="flag.txt")
+    payload.unlink()
+
+    result = unpack_nested_archives(archive, output, sevenzip=ignored_sevenzip)
+
+    assert result.archives_processed == 1
+    assert result.steps[0]["archive_type"] == "7z"
+    assert any(Path(path).name == "flag.txt" for path in result.final_files)
+    assert any(
+        Path(path).read_bytes() == b"flag{native_7z_nested}"
+        for path in map(Path, result.final_files)
+    )
 
 
 def test_detect_archive_type_by_magic_without_extension(tmp_path: Path) -> None:

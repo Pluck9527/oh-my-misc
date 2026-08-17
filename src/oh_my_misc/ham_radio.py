@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import shutil
-import subprocess
-import tempfile
 import wave
 from dataclasses import asdict, dataclass
 from itertools import pairwise
@@ -96,6 +93,9 @@ def decode_ham_radio(
 ) -> HamRadioResult:
     if mode != "afsk1200":
         raise ValueError("当前 ham 原生路径支持 afsk1200")
+    if backend not in {"native", "multimon", "auto"}:
+        raise ValueError("backend 必须是 native、multimon 或 auto")
+    _ = multimon
     signal = _read_wav_signal(input_path, reverse_audio=reverse_audio, invert_audio=invert_audio)
     if max_seconds is not None:
         keep = max(1, int(max_seconds * signal.sample_rate))
@@ -105,15 +105,6 @@ def decode_ham_radio(
             signal.channels,
             signal.sample_width,
             min(signal.frame_count, keep),
-        )
-    executable = _resolve_multimon(multimon) if backend in {"auto", "multimon"} else None
-    if backend == "multimon" or (backend == "auto" and executable is not None):
-        return _decode_with_multimon(
-            input_path,
-            output_path,
-            signal,
-            executable=executable,
-            raw_output=raw_output,
         )
     if raw_output is not None:
         _write_raw_s16(signal, raw_output, target_rate=22_050)
@@ -507,78 +498,11 @@ def _synthesize_afsk_bits(bits: list[int], *, sample_rate: int, amplitude: float
     return np.concatenate(out) if out else np.asarray([], dtype=np.float64)
 
 
-def _resolve_multimon(multimon: Path | None) -> str | None:
-    if multimon is not None:
-        return str(multimon)
-    return shutil.which("multimon-ng")
-
-
-def _decode_with_multimon(
-    input_path: Path,
-    output_path: Path | None,
-    signal: _WaveSignal,
-    *,
-    executable: str | None,
-    raw_output: Path | None,
-) -> HamRadioResult:
-    if executable is None:
-        raise ValueError("未找到 multimon-ng；可改用 --backend native")
-    with tempfile.TemporaryDirectory() as directory:
-        raw_path = raw_output or Path(directory) / "input.raw"
-        _write_raw_s16(signal, raw_path, target_rate=22_050)
-        completed = subprocess.run(
-            [executable, "-t", "raw", "-a", "AFSK1200", str(raw_path)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    if completed.returncode not in (0, 1):
-        raise ValueError((completed.stderr or completed.stdout).strip() or "multimon-ng 执行失败")
-    lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
-    messages = [_clean_multimon_line(line) for line in lines]
-    text = "\n".join(messages)
-    written = _write_text_output(output_path, text)
-    packets = [{"message": message, "raw": line} for message, line in zip(messages, lines, strict=False)]
-    return HamRadioResult(
-        operation="audio.ham.decode",
-        input_path=str(input_path),
-        output_path=str(output_path) if output_path is not None else "-",
-        output_paths=[str(output_path)] if output_path is not None else [],
-        mode="afsk1200",
-        backend="multimon",
-        sample_rate=signal.sample_rate,
-        channels=signal.channels,
-        sample_width=signal.sample_width,
-        samples=len(signal.samples),
-        duration_seconds=len(signal.samples) / signal.sample_rate,
-        demod_sample_rate=22_050,
-        bit_rate=_BIT_RATE,
-        bit_count=0,
-        frame_count=len(messages),
-        valid_frames=len(messages),
-        messages=messages,
-        packets=packets,
-        findings=_find_aprs_hints(messages),
-        raw_path=str(raw_output) if raw_output is not None else None,
-        executable=executable,
-        written_bytes=written,
-    )
-
-
 def _write_raw_s16(signal: _WaveSignal, raw_path: Path, *, target_rate: int) -> None:
     resampled = _resample(signal.samples, signal.sample_rate, target_rate)
     pcm = np.clip(resampled * 32767.0, -32768, 32767).astype("<i2")
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     raw_path.write_bytes(pcm.tobytes())
-
-
-def _clean_multimon_line(line: str) -> str:
-    prefixes = ("APRS:", "AFSK1200:")
-    text = line.strip()
-    for prefix in prefixes:
-        if text.startswith(prefix):
-            text = text[len(prefix) :].strip()
-    return text
 
 
 def _write_text_output(output_path: Path | None, text: str) -> int:

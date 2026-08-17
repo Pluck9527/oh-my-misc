@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import math
-import shutil
-import subprocess
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -17,7 +15,7 @@ class OutguessResult:
     output_paths: list[str]
     tool_path: str
     key_used: bool
-    backend: str = "tool"
+    backend: str = "native"
     found_key: str | None = None
     attempts: int = 0
     written_bytes: int = 0
@@ -37,47 +35,26 @@ def extract_outguess(
     outguess_path: Path | None = None,
     backend: str = "auto",
 ) -> OutguessResult:
-    """Extract OutGuess data using the native PNM backend or upstream executable."""
+    """Extract OutGuess data with the native Python backend."""
 
     _check_file(input_path, "JPEG/PNM 文件")
     if backend not in {"auto", "native", "tool"}:
         raise ValueError("backend 必须是 auto、native 或 tool")
-    if backend in {"auto", "native"} and _is_native_supported(input_path):
-        payload = extract_outguess_native(input_path, key=key)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(payload)
-        return OutguessResult(
-            operation="image.outguess.extract-native",
-            input_path=str(input_path),
-            output_path=str(output_path),
-            output_paths=[str(output_path)],
-            tool_path="python",
-            backend="native",
-            key_used=bool(key),
-            found_key=key,
-            attempts=1,
-            written_bytes=len(payload),
-        )
-    if backend == "native":
-        raise ValueError("OutGuess native backend 当前支持 PNM/PPM/PGM 和 baseline JPEG；其他格式请用 --backend tool")
-    tool = _resolve_tool(outguess_path)
+    _ = outguess_path
+    payload = extract_outguess_native(input_path, key=key)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    completed = _run_outguess_extract(tool, input_path, output_path, key)
-    if completed.returncode != 0:
-        raise ValueError(_tool_error(completed))
+    output_path.write_bytes(payload)
     return OutguessResult(
-        operation="image.outguess.extract",
+        operation="image.outguess.extract-native",
         input_path=str(input_path),
         output_path=str(output_path),
         output_paths=[str(output_path)],
-        tool_path=tool,
-        backend="tool",
+        tool_path="python",
+        backend="native",
         key_used=bool(key),
         found_key=key,
         attempts=1,
-        written_bytes=output_path.stat().st_size if output_path.exists() else 0,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
+        written_bytes=len(payload),
     )
 
 
@@ -90,48 +67,27 @@ def hide_outguess(
     outguess_path: Path | None = None,
     backend: str = "auto",
 ) -> OutguessResult:
-    """Embed OutGuess data using the native PNM backend or upstream executable."""
+    """Embed OutGuess data with the native Python backend."""
 
     _check_file(input_path, "JPEG/PNM 文件")
     _check_file(payload_path, "载荷文件")
     if backend not in {"auto", "native", "tool"}:
         raise ValueError("backend 必须是 auto、native 或 tool")
-    if backend in {"auto", "native"} and _is_native_supported(input_path):
-        result_bytes = hide_outguess_native(input_path, payload_path.read_bytes(), key=key)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(result_bytes)
-        return OutguessResult(
-            operation="image.outguess.hide-native",
-            input_path=str(input_path),
-            output_path=str(output_path),
-            output_paths=[str(output_path)],
-            tool_path="python",
-            backend="native",
-            key_used=bool(key),
-            found_key=key,
-            attempts=1,
-            written_bytes=len(result_bytes),
-        )
-    if backend == "native":
-        raise ValueError("OutGuess native backend 当前支持 PNM/PPM/PGM 和 baseline JPEG；其他格式请用 --backend tool")
-    tool = _resolve_tool(outguess_path)
+    _ = outguess_path
+    result_bytes = hide_outguess_native(input_path, payload_path.read_bytes(), key=key)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    completed = _run_outguess_hide(tool, input_path, output_path, payload_path, key)
-    if completed.returncode != 0:
-        raise ValueError(_tool_error(completed))
+    output_path.write_bytes(result_bytes)
     return OutguessResult(
-        operation="image.outguess.hide",
+        operation="image.outguess.hide-native",
         input_path=str(input_path),
         output_path=str(output_path),
         output_paths=[str(output_path)],
-        tool_path=tool,
-        backend="tool",
+        tool_path="python",
+        backend="native",
         key_used=bool(key),
         found_key=key,
         attempts=1,
-        written_bytes=output_path.stat().st_size if output_path.exists() else 0,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
+        written_bytes=len(result_bytes),
     )
 
 
@@ -152,73 +108,34 @@ def brute_outguess(
     _check_file(wordlist_path, "字典")
     if backend not in {"auto", "native", "tool"}:
         raise ValueError("backend 必须是 auto、native 或 tool")
+    _ = outguess_path
     attempts = 0
     last_error = ""
-    if backend in {"auto", "native"} and _is_native_supported(input_path):
-        for candidate in _key_candidates(wordlist_path, include_empty=include_empty):
-            attempts += 1
-            try:
-                payload = extract_outguess_native(input_path, key=candidate)
-            except ValueError as error:
-                last_error = str(error)
-                continue
-            if contains is not None and contains not in payload:
-                continue
-            if prefix is not None and not payload.startswith(prefix):
-                continue
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(payload)
-            return OutguessResult(
-                operation="image.outguess.brute-native",
-                input_path=str(input_path),
-                output_path=str(output_path),
-                output_paths=[str(output_path)],
-                tool_path="python",
-                backend="native",
-                key_used=bool(candidate),
-                found_key=candidate,
-                attempts=attempts,
-                written_bytes=len(payload),
-            )
-        extra = f"；最后错误：{last_error}" if last_error else ""
-        raise ValueError(f"OutGuess 字典爆破失败，尝试 {attempts} 个密钥{extra}")
-    if backend == "native":
-        raise ValueError("OutGuess native backend 当前支持 PNM/PPM/PGM 和 baseline JPEG；其他格式请用 --backend tool")
-    tool = _resolve_tool(outguess_path)
-    with tempfile.TemporaryDirectory(prefix="omm-outguess-") as directory:
-        tmp_output = Path(directory) / "candidate.bin"
-        for candidate in _key_candidates(wordlist_path, include_empty=include_empty):
-            attempts += 1
-            if tmp_output.exists():
-                tmp_output.unlink()
-            completed = _run_outguess_extract(tool, input_path, tmp_output, candidate)
-            if completed.returncode != 0:
-                last_error = _tool_error(completed)
-                continue
-            if not tmp_output.exists():
-                last_error = "outguess 没有写出文件"
-                continue
-            payload = tmp_output.read_bytes()
-            if contains is not None and contains not in payload:
-                continue
-            if prefix is not None and not payload.startswith(prefix):
-                continue
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(payload)
-            return OutguessResult(
-                operation="image.outguess.brute",
-                input_path=str(input_path),
-                output_path=str(output_path),
-                output_paths=[str(output_path)],
-                tool_path=tool,
-                backend="tool",
-                key_used=bool(candidate),
-                found_key=candidate,
-                attempts=attempts,
-                written_bytes=len(payload),
-                stdout=completed.stdout,
-                stderr=completed.stderr,
-            )
+    for candidate in _key_candidates(wordlist_path, include_empty=include_empty):
+        attempts += 1
+        try:
+            payload = extract_outguess_native(input_path, key=candidate)
+        except ValueError as error:
+            last_error = str(error)
+            continue
+        if contains is not None and contains not in payload:
+            continue
+        if prefix is not None and not payload.startswith(prefix):
+            continue
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(payload)
+        return OutguessResult(
+            operation="image.outguess.brute-native",
+            input_path=str(input_path),
+            output_path=str(output_path),
+            output_paths=[str(output_path)],
+            tool_path="python",
+            backend="native",
+            key_used=bool(candidate),
+            found_key=candidate,
+            attempts=attempts,
+            written_bytes=len(payload),
+        )
     extra = f"；最后错误：{last_error}" if last_error else ""
     raise ValueError(f"OutGuess 字典爆破失败，尝试 {attempts} 个密钥{extra}")
 
@@ -632,53 +549,6 @@ def _write_pnm_bytes(magic: str, width: int, height: int, maxval: int, pixels: b
     output_magic = "P5" if magic in {"P2", "P5"} else "P6"
     header = f"{output_magic}\n{width} {height}\n{maxval}\n".encode("ascii")
     return header + pixels
-
-
-def _run_outguess_extract(
-    tool: str,
-    input_path: Path,
-    output_path: Path,
-    key: str,
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [tool, "-k", key, "-r", str(input_path), str(output_path)],
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=120,
-    )
-
-
-def _run_outguess_hide(
-    tool: str,
-    input_path: Path,
-    output_path: Path,
-    payload_path: Path,
-    key: str,
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [tool, "-k", key, "-d", str(payload_path), str(input_path), str(output_path)],
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=120,
-    )
-
-
-def _resolve_tool(configured: Path | None) -> str:
-    if configured is not None:
-        if not configured.is_file():
-            raise FileNotFoundError(f"outguess 不存在：{configured}")
-        return str(configured)
-    found = shutil.which("outguess")
-    if found is None:
-        raise FileNotFoundError("找不到 outguess，请安装 outguess 或用 --outguess 指定可执行文件")
-    return found
-
-
-def _tool_error(completed: subprocess.CompletedProcess[str]) -> str:
-    details = (completed.stderr or completed.stdout).strip()
-    return f"outguess 失败，exit={completed.returncode}" + (f"：{details}" if details else "")
 
 
 def _key_candidates(wordlist_path: Path, *, include_empty: bool) -> list[str]:

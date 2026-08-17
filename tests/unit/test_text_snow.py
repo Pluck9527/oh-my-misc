@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import stat
-import sys
 from pathlib import Path
 
 from oh_my_misc.cli import main
@@ -63,38 +61,21 @@ def test_snow_cli_json_roundtrip(tmp_path: Path, capsys) -> None:
     assert extracted.read_bytes() == b"flag{cli}"
 
 
-def test_snow_tool_backend_uses_stegsnow_flags(tmp_path: Path) -> None:
+def test_snow_password_compress_tool_alias_is_native(tmp_path: Path) -> None:
     cover = tmp_path / "cover.txt"
     stego = tmp_path / "stego.txt"
     extracted = tmp_path / "out.bin"
-    log = tmp_path / "args.jsonl"
-    tool = tmp_path / "stegsnow"
-    cover.write_text("visible\n", encoding="utf-8")
-    script = f"""#!{sys.executable}
-from __future__ import annotations
-import json, shutil, sys
-from pathlib import Path
-log = Path({str(log)!r})
-log.write_text((log.read_text() if log.exists() else '') + json.dumps(sys.argv[1:]) + '\\n')
-args = sys.argv[1:]
-if '-f' in args:
-    infile = Path(args[-2]); outfile = Path(args[-1])
-    outfile.write_bytes(infile.read_bytes() + b'\\t')
-else:
-    outfile = Path(args[-1])
-    outfile.write_bytes(b'from-tool')
-"""
-    tool.write_text(script, encoding="utf-8")
-    tool.chmod(tool.stat().st_mode | stat.S_IXUSR)
+    ignored_tool = tmp_path / "missing-stegsnow"
+    cover.write_text("visible\ncarrier\nlines\n", encoding="utf-8")
 
     hide_result = hide_snow(
         cover,
         stego,
-        text="secret",
+        text="secret-native",
         password="pw",
         compress=True,
         backend="tool",
-        snow_path=tool,
+        snow_path=ignored_tool,
     )
     extract_result = extract_snow(
         stego,
@@ -102,13 +83,11 @@ else:
         password="pw",
         compress=True,
         backend="tool",
-        snow_path=tool,
+        snow_path=ignored_tool,
     )
 
-    calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
-    assert hide_result.backend == "tool"
-    assert extract_result.backend == "tool"
-    assert calls[0][:5] == ["-Q", "-C", "-p", "pw", "-l"]
-    assert "-f" in calls[0]
-    assert calls[1] == ["-Q", "-C", "-p", "pw", str(stego), str(extracted)]
-    assert extracted.read_bytes() == b"from-tool"
+    assert hide_result.backend == "native"
+    assert hide_result.tool_path == "python"
+    assert extract_result.backend == "native"
+    assert extract_result.tool_path == "python"
+    assert extracted.read_bytes() == b"secret-native"

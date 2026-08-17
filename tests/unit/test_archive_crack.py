@@ -5,6 +5,8 @@ import json
 import struct
 from pathlib import Path
 
+import py7zr
+
 from oh_my_misc.archive_crack import crack_archive_password, zipcrypto_encrypt_for_test
 from oh_my_misc.cli import main
 
@@ -86,6 +88,36 @@ def test_crack_zipcrypto_generated_digits(tmp_path: Path) -> None:
 
     assert result.found_password == "42"
     assert result.verified is True
+
+
+def test_crack_7z_native_wordlist_and_extract(tmp_path: Path) -> None:
+    archive = tmp_path / "secret.7z"
+    payload = tmp_path / "flag.txt"
+    wordlist = tmp_path / "passwords.txt"
+    output = tmp_path / "out"
+    payload.write_bytes(b"flag{native_7z_crack}")
+    with py7zr.SevenZipFile(archive, mode="w", password="secret") as seven_zip:
+        seven_zip.write(payload, arcname="flag.txt")
+    payload.unlink()
+    wordlist.write_text("bad\nsecret\n", encoding="utf-8")
+
+    result = crack_archive_password(
+        archive,
+        output,
+        wordlist=wordlist,
+        workers=1,
+        chunk_size=1,
+        backend="auto",
+        sevenzip=tmp_path / "ignored-external-7z",
+    )
+
+    assert result.operation == "archive.crack"
+    assert result.backend == "native-7z"
+    assert result.archive_format == "7z"
+    assert result.found_password == "secret"
+    assert result.attempts == 2
+    assert result.verified is True
+    assert (output / "flag.txt").read_bytes() == b"flag{native_7z_crack}"
 
 
 def test_zip_crack_cli_json(tmp_path: Path, capsys) -> None:

@@ -4,7 +4,6 @@ import contextlib
 import io
 import json
 import tempfile
-import textwrap
 import unittest
 import wave
 from pathlib import Path
@@ -30,49 +29,55 @@ class SteghideTest(unittest.TestCase):
     def test_extract_uses_empty_password_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            tool = _fake_steghide(root)
-            stego = root / "empty.jpg"
+            stego = root / "empty.wav"
             output = root / "payload.txt"
-            stego.write_text("", encoding="utf-8")
+            _write_native_steghide_wav(stego, b"flag{empty_steghide}", password="")
 
-            result = extract_steghide(stego, output, steghide_path=tool)
+            result = extract_steghide(
+                stego, output, steghide_path=root / "ignored-steghide", backend="tool"
+            )
 
-            self.assertEqual(result.operation, "image.steghide.extract")
+            self.assertEqual(result.operation, "image.steghide.extract-native")
+            self.assertEqual(result.tool_path, "python")
             self.assertEqual(result.found_password, "")
-            self.assertEqual(output.read_text(encoding="utf-8"), "flag{empty_steghide}")
+            self.assertEqual(output.read_bytes(), b"flag{empty_steghide}")
 
     def test_brute_wordlist_finds_password(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            tool = _fake_steghide(root)
-            stego = root / "secret.jpg"
+            stego = root / "secret.wav"
             words = root / "words.txt"
             output = root / "payload.txt"
-            stego.write_text("letmein", encoding="utf-8")
+            _write_native_steghide_wav(
+                stego, b"flag{letmein}", password="letmein", encrypted=True
+            )
             words.write_text("bad\nletmein\n", encoding="utf-8")
 
             result = brute_steghide(
                 stego,
                 words,
                 output,
-                steghide_path=tool,
+                steghide_path=root / "ignored-steghide",
+                backend="tool",
                 contains=b"flag{",
                 include_empty=False,
             )
 
-            self.assertEqual(result.operation, "image.steghide.brute")
+            self.assertEqual(result.operation, "image.steghide.brute-native")
+            self.assertEqual(result.tool_path, "python")
             self.assertEqual(result.found_password, "letmein")
             self.assertEqual(result.attempts, 2)
-            self.assertEqual(output.read_text(encoding="utf-8"), "flag{letmein}")
+            self.assertEqual(output.read_bytes(), b"flag{letmein}")
 
     def test_cli_extract_wordlist_json(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            tool = _fake_steghide(root)
             stego = root / "secret.wav"
             words = root / "words.txt"
             output = root / "payload.txt"
-            stego.write_text("hunter2", encoding="utf-8")
+            _write_native_steghide_wav(
+                stego, b"flag{hunter2}", password="hunter2", encrypted=True
+            )
             words.write_text("wrong\nhunter2\n", encoding="utf-8")
 
             stdout = io.StringIO()
@@ -86,8 +91,8 @@ class SteghideTest(unittest.TestCase):
                         "--wordlist",
                         str(words),
                         "--no-empty",
-                        "--steghide",
-                        str(tool),
+                        "--backend",
+                        "tool",
                         "--contains",
                         "flag{",
                         "--output",
@@ -97,10 +102,11 @@ class SteghideTest(unittest.TestCase):
                 )
             payload = json.loads(stdout.getvalue())
             self.assertEqual(exit_code, 0)
-            self.assertEqual(payload["operation"], "image.steghide.brute")
+            self.assertEqual(payload["operation"], "image.steghide.brute-native")
+            self.assertEqual(payload["tool_path"], "python")
             self.assertEqual(payload["found_password"], "hunter2")
             self.assertEqual(payload["attempts"], 2)
-            self.assertEqual(output.read_text(encoding="utf-8"), "flag{hunter2}")
+            self.assertEqual(output.read_bytes(), b"flag{hunter2}")
 
     def test_native_wav_extracts_without_external_tool(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -217,44 +223,6 @@ class SteghideTest(unittest.TestCase):
             self.assertEqual(result.found_password, "open-sesame")
             self.assertEqual(result.attempts, 2)
             self.assertEqual(output.read_bytes(), b"flag{native_brute}")
-
-
-def _fake_steghide(root: Path) -> Path:
-    path = root / "steghide"
-    path.write_text(
-        textwrap.dedent(
-            r"""
-            #!/usr/bin/env python3
-            from pathlib import Path
-            import sys
-
-            args = sys.argv[1:]
-            if not args or args[0] != "extract":
-                print("only extract is supported", file=sys.stderr)
-                raise SystemExit(2)
-            def value(flag):
-                index = args.index(flag)
-                return args[index + 1]
-            sf = Path(value("-sf"))
-            xf = Path(value("-xf"))
-            password = value("-p")
-            expected = sf.read_text(encoding="utf-8")
-            if password != expected:
-                print("could not extract any data with that passphrase!", file=sys.stderr)
-                raise SystemExit(1)
-            xf.parent.mkdir(parents=True, exist_ok=True)
-            label = "empty_steghide" if password == "" else password
-            xf.write_text(f"flag{{{label}}}", encoding="utf-8")
-            print(f"wrote extracted data to {xf}")
-            raise SystemExit(0)
-            """
-        ).strip()
-        + "\n",
-        encoding="utf-8",
-    )
-    path.chmod(0o755)
-    return path
-
 
 def _write_native_steghide_wav(
     path: Path, payload: bytes, *, password: str, encrypted: bool = False

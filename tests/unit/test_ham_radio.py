@@ -85,6 +85,27 @@ class HamRadioTest(unittest.TestCase):
             self.assertTrue(raw.is_file())
             self.assertIn("flag{cli_ham}", output.read_text(encoding="utf-8"))
 
+    def test_multimon_backend_alias_stays_native(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wav = root / "aprs.wav"
+            output = root / "decoded.txt"
+            raw = root / "latlong.raw"
+            encode_ax25_afsk1200_wav(wav, info="flag{native_alias}")
+
+            result = decode_ham_radio(
+                wav,
+                output,
+                backend="multimon",
+                raw_output=raw,
+                multimon=root / "ignored-multimon",
+            )
+
+            self.assertEqual(result.backend, "native")
+            self.assertIsNone(result.executable)
+            self.assertTrue(raw.is_file())
+            self.assertIn("flag{native_alias}", output.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

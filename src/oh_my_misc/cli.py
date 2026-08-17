@@ -16,6 +16,7 @@ from oh_my_misc.cloacked_pixel import (
     extract_cloacked_pixel,
     hide_cloacked_pixel,
 )
+from oh_my_misc.deegger import extract_deegger, hide_deegger, inspect_deegger
 from oh_my_misc.deepsound import analyze_deepsound, extract_deepsound, hide_deepsound
 from oh_my_misc.f5 import brute_f5, extract_f5, hide_f5
 from oh_my_misc.ham_radio import decode_ham_radio, encode_ax25_afsk1200_wav, inspect_ham_radio
@@ -31,6 +32,11 @@ from oh_my_misc.image_ops import (
     sample_pixels,
     split_frames,
     split_grid,
+)
+from oh_my_misc.image_steganography import (
+    extract_image_steganography,
+    hide_image_steganography,
+    inspect_image_steganography,
 )
 from oh_my_misc.inspection import inspect_file
 from oh_my_misc.jphs import brute_jphs, extract_jphs, hide_jphs
@@ -155,7 +161,7 @@ def build_parser() -> argparse.ArgumentParser:
     crc_reverse.add_argument("--json", action="store_true", dest="as_json")
 
     crack_parser = zip_commands.add_parser(
-        "crack", aliases=["brute"], help="高速爆破 ZIP/7z/RAR 等压缩包密码"
+        "crack", aliases=["brute"], help="高速爆破 ZIP/7z 压缩包密码"
     )
     crack_parser.add_argument("file", type=Path, help="加密压缩包")
     crack_parser.add_argument("--wordlist", type=Path, help="密码字典，一行一个密码")
@@ -186,7 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--backend",
         choices=("auto", "native", "7z"),
         default="auto",
-        help="native 对 ZipCrypto 做 12 字节头快速筛选；7z 兼容更多格式",
+        help="native 对 ZipCrypto 做 12 字节头快速筛选；7z 使用 py7zr 原生处理",
     )
     crack_parser.add_argument("--workers", type=int, default=0, help="并发进程数，0=CPU 核数")
     crack_parser.add_argument("--chunk-size", type=int, default=4096, help="每个任务块候选数")
@@ -194,12 +200,11 @@ def build_parser() -> argparse.ArgumentParser:
     crack_parser.add_argument(
         "--no-verify", action="store_true", help="只做 ZIP 加密头筛选，不读完整条目校验"
     )
-    crack_parser.add_argument("--sevenzip", type=Path, help="7z/7zz 可执行文件路径")
     crack_parser.add_argument("-o", "--output", type=Path, help="命中后解压到目录")
     crack_parser.add_argument("--json", action="store_true", dest="as_json")
 
     nested_parser = zip_commands.add_parser(
-        "nested", aliases=["unpack", "unroll"], help="递归解压 ZIP/TAR/GZ/BZ2/XZ/7z/RAR 套娃"
+        "nested", aliases=["unpack", "unroll"], help="递归解压 ZIP/TAR/GZ/BZ2/XZ/7z 套娃"
     )
     nested_parser.add_argument("file", type=Path, help="初始压缩包")
     nested_parser.add_argument("-o", "--output", type=Path, required=True, help="输出目录")
@@ -210,10 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
     nested_parser.add_argument(
         "--max-output-bytes", type=int, default=1_000_000_000, help="最多解出总字节，默认 1GB"
     )
-    nested_parser.add_argument("--password", help="传给 zip/7z/rar 的密码")
-    nested_parser.add_argument(
-        "--sevenzip", type=Path, help="7z/7zz/7za 可执行文件路径，用于 7z/rar"
-    )
+    nested_parser.add_argument("--password", help="传给 zip/7z 的密码")
     nested_parser.add_argument(
         "--flatten-single", action="store_true", help="单文件链式套娃时优先沿唯一下一层继续解"
     )
@@ -261,7 +263,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--backend",
         choices=("auto", "native", "7z"),
         default="auto",
-        help="native 支持 ZipCrypto；7z 兼容更多格式",
+        help="native 支持 ZipCrypto；7z 使用 py7zr 原生处理",
     )
     invisible_parser.add_argument("--workers", type=int, default=0, help="并发进程数，0=CPU 核数")
     invisible_parser.add_argument("--chunk-size", type=int, default=4096, help="每个任务块候选数")
@@ -269,7 +271,6 @@ def build_parser() -> argparse.ArgumentParser:
     invisible_parser.add_argument(
         "--no-verify", action="store_true", help="只做 ZIP 加密头筛选，不读完整条目校验"
     )
-    invisible_parser.add_argument("--sevenzip", type=Path, help="7z/7zz 可执行文件路径")
     invisible_parser.add_argument("-o", "--output", type=Path, help="命中后解压到目录")
     invisible_parser.add_argument("--json", action="store_true", dest="as_json")
 
@@ -315,12 +316,12 @@ def build_parser() -> argparse.ArgumentParser:
     ntfs_parser = zip_commands.add_parser(
         "ntfs-stream",
         aliases=["ads", "rar-ads"],
-        help="提取 RAR5 中保存的 NTFS Alternate Data Streams",
+        help="提取 RAR4/RAR5 中保存的 NTFS Alternate Data Streams",
     )
     ntfs_actions = ntfs_parser.add_subparsers(dest="ntfs_action", required=True)
 
-    ntfs_list = ntfs_actions.add_parser("list", aliases=["scan"], help="列出 RAR5 内的 NTFS 数据流")
-    ntfs_list.add_argument("file", type=Path, help="RAR5 压缩包")
+    ntfs_list = ntfs_actions.add_parser("list", aliases=["scan"], help="列出 RAR4/RAR5 内的 NTFS 数据流")
+    ntfs_list.add_argument("file", type=Path, help="RAR4/RAR5 压缩包")
     ntfs_list.add_argument(
         "--include", default="", help="仅处理 host+stream 名称包含该子串的数据流"
     )
@@ -331,9 +332,9 @@ def build_parser() -> argparse.ArgumentParser:
     ntfs_list.add_argument("--json", action="store_true", dest="as_json")
 
     ntfs_extract = ntfs_actions.add_parser(
-        "extract", aliases=["dump"], help="提取 RAR5 NTFS 数据流到 sidecar 文件"
+        "extract", aliases=["dump"], help="提取 RAR4/RAR5 NTFS 数据流到 sidecar 文件"
     )
-    ntfs_extract.add_argument("file", type=Path, help="RAR5 压缩包")
+    ntfs_extract.add_argument("file", type=Path, help="RAR4/RAR5 压缩包")
     ntfs_extract.add_argument("-o", "--output", type=Path, required=True, help="输出目录")
     ntfs_extract.add_argument(
         "--include", default="", help="仅处理 host+stream 名称包含该子串的数据流"
@@ -371,8 +372,7 @@ def build_parser() -> argparse.ArgumentParser:
     attack_parser.add_argument(
         "--ignore-check-byte", action="store_true", help="不自动使用 check byte"
     )
-    attack_parser.add_argument("--jobs", type=int, default=0, help="bkcrack 线程数，0=默认")
-    attack_parser.add_argument("--bkcrack", type=Path, help="bkcrack 可执行文件路径")
+    attack_parser.add_argument("--jobs", type=int, default=0, help="兼容参数；原生 Python 后端忽略")
     attack_parser.add_argument(
         "--new-password", default="", help="命中后用 -U 改成的新密码，默认空密码"
     )
@@ -423,8 +423,7 @@ def build_parser() -> argparse.ArgumentParser:
     preset_parser.add_argument(
         "--ignore-check-byte", action="store_true", help="不自动使用 check byte"
     )
-    preset_parser.add_argument("--jobs", type=int, default=0, help="bkcrack 线程数，0=默认")
-    preset_parser.add_argument("--bkcrack", type=Path, help="bkcrack 可执行文件路径")
+    preset_parser.add_argument("--jobs", type=int, default=0, help="兼容参数；原生 Python 后端忽略")
     preset_parser.add_argument(
         "--new-password", default="", help="命中后用 -U 改成的新密码，默认空密码"
     )
@@ -447,7 +446,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     keys_parser.add_argument("--new-password", default="", help="-U 导出的新密码，默认空密码")
     keys_parser.add_argument("--decrypt", action="store_true", help="用 -D 直接生成去密码 ZIP")
-    keys_parser.add_argument("--bkcrack", type=Path, help="bkcrack 可执行文件路径")
     keys_parser.add_argument("-o", "--output", type=Path, required=True, help="导出 ZIP")
     keys_parser.add_argument("--json", action="store_true", dest="as_json")
 
@@ -458,11 +456,12 @@ def build_parser() -> argparse.ArgumentParser:
     recover_parser.add_argument(
         "--keys", nargs=3, required=True, metavar=("X", "Y", "Z"), help="三段 32-bit 十六进制密钥"
     )
-    recover_parser.add_argument("--charset", default="?l?u?d", help="bkcrack 字符集，默认 ?l?u?d")
+    recover_parser.add_argument("--charset", default="?l?u?d", help="原生枚举字符集，默认 ?l?u?d")
     recover_parser.add_argument("--length", help="长度范围，如 1..6、..8 或 6")
     recover_parser.add_argument("--mask", help="掩码模式，如 ?u?l?l?l?d?d")
-    recover_parser.add_argument("--jobs", type=int, default=0, help="bkcrack 线程数，0=默认")
-    recover_parser.add_argument("--bkcrack", type=Path, help="bkcrack 可执行文件路径")
+    recover_parser.add_argument(
+        "--jobs", type=int, default=0, help="兼容参数；原生 Python 后端忽略"
+    )
     recover_parser.add_argument("--json", action="store_true", dest="as_json")
 
     audio_parser = commands.add_parser("audio", help="音频分析与解码，和 image 同级")
@@ -480,7 +479,9 @@ def build_parser() -> argparse.ArgumentParser:
     lyra_inspect.add_argument("--json", action="store_true", dest="as_json")
 
     lyra_decode = lyra_actions.add_parser(
-        "decode", aliases=["decompress"], help="调用 Google Lyra decoder_main 解码 .lyra 到 WAV"
+        "decode",
+        aliases=["decompress"],
+        help="通过内置 Google Lyra C API wrapper 解码 .lyra 到 WAV",
     )
     lyra_decode.add_argument("file", type=Path, help="输入 .lyra 文件")
     lyra_decode.add_argument("-o", "--output", type=Path, required=True, help="输出 WAV 文件")
@@ -498,12 +499,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=16000,
         help="输出采样率，默认 16000",
     )
-    lyra_decode.add_argument("--decoder", type=Path, help="Google Lyra decoder_main 路径")
-    lyra_decode.add_argument("--model-path", type=Path, help="Google Lyra model_coeffs 路径")
+    lyra_decode.add_argument(
+        "--library", type=Path, dest="native_library", help="Lyra native wrapper 动态库路径"
+    )
+    lyra_decode.add_argument(
+        "--model-path", type=Path, help="Google Lyra model_coeffs 目录；默认使用内置源码里的模型"
+    )
     lyra_decode.add_argument(
         "--randomize-num-samples",
         action="store_true",
-        help="传给 decoder_main 的随机请求样本数调试开关",
+        help="随机请求样本数调试开关",
     )
     lyra_decode.add_argument("--packet-loss-rate", type=float, default=0.0, help="模拟丢包率")
     lyra_decode.add_argument(
@@ -512,12 +517,14 @@ def build_parser() -> argparse.ArgumentParser:
     lyra_decode.add_argument(
         "--fixed-packet-loss-pattern",
         default="",
-        help="固定丢包模式，格式沿用 decoder_main: start,duration,...",
+        help="固定丢包模式：start,duration,...",
     )
     lyra_decode.add_argument("--json", action="store_true", dest="as_json")
 
     lyra_encode = lyra_actions.add_parser(
-        "encode", aliases=["compress"], help="调用 Google Lyra encoder_main 编码 WAV 到 .lyra"
+        "encode",
+        aliases=["compress"],
+        help="通过内置 Google Lyra C API wrapper 编码 WAV 到 .lyra",
     )
     lyra_encode.add_argument("file", type=Path, help="输入 16-bit mono WAV 文件")
     lyra_encode.add_argument("-o", "--output", type=Path, required=True, help="输出 .lyra 文件")
@@ -528,8 +535,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=3200,
         help="Lyra 码率，默认 3200",
     )
-    lyra_encode.add_argument("--encoder", type=Path, help="Google Lyra encoder_main 路径")
-    lyra_encode.add_argument("--model-path", type=Path, help="Google Lyra model_coeffs 路径")
+    lyra_encode.add_argument(
+        "--library", type=Path, dest="native_library", help="Lyra native wrapper 动态库路径"
+    )
+    lyra_encode.add_argument(
+        "--model-path", type=Path, help="Google Lyra model_coeffs 目录；默认使用内置源码里的模型"
+    )
     lyra_encode.add_argument(
         "--enable-preprocessing", action="store_true", help="启用 Lyra no-op/预处理开关"
     )
@@ -605,13 +616,18 @@ def build_parser() -> argparse.ArgumentParser:
     mp3stego_brute.add_argument("--json", action="store_true", dest="as_json")
 
     mp3stego_encode = mp3stego_actions.add_parser(
-        "encode", aliases=["hide"], help="调用 MP3Stego Encode/Encode.exe 从 WAV 生成 MP3"
+        "encode", aliases=["hide"], help="原生写入 MP3Stego part2_3_length 奇偶位"
     )
-    mp3stego_encode.add_argument("file", type=Path, help="输入 WAV 文件")
+    mp3stego_encode.add_argument("file", type=Path, help="输入 MP3 载体；WAV 会生成测试 MP3 载体")
     mp3stego_encode.add_argument("--payload", type=Path, required=True, help="要隐藏的文件")
     mp3stego_encode.add_argument("-o", "--output", type=Path, required=True, help="输出 MP3 文件")
     mp3stego_encode.add_argument("-p", "--password", default="", help="密码，默认空密码")
-    mp3stego_encode.add_argument("--encoder", type=Path, help="MP3Stego Encode/Encode.exe 路径")
+    mp3stego_encode.add_argument(
+        "--length-size",
+        choices=("4", "8"),
+        default="4",
+        help="长度头字节数，默认 4",
+    )
     mp3stego_encode.add_argument("--json", action="store_true", dest="as_json")
 
     sstv_parser = audio_commands.add_parser(
@@ -677,15 +693,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--backend",
         choices=("native", "multimon", "auto"),
         default="native",
-        help="默认 native；multimon 调用 multimon-ng",
+        help="后端兼容项：native/auto/multimon 均走原生 Python",
     )
     ham_decode.add_argument("--reverse-audio", action="store_true", help="先反转音频再解码")
     ham_decode.add_argument("--invert-audio", action="store_true", help="先反相音频再解码")
     ham_decode.add_argument("--max-seconds", type=float, help="只处理开头 N 秒")
     ham_decode.add_argument(
-        "--raw-output", type=Path, help="同时导出 multimon-ng 可用的 signed 16-bit raw"
+        "--raw-output", type=Path, help="同时导出 signed 16-bit raw"
     )
-    ham_decode.add_argument("--multimon", type=Path, help="multimon-ng 可执行文件路径")
     ham_decode.add_argument("--json", action="store_true", dest="as_json")
 
     ham_encode = ham_actions.add_parser(
@@ -1206,6 +1221,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cloacked_analyse_parser.add_argument("--json", action="store_true", dest="as_json")
 
+    _add_image_steganography_command(image_commands)
+
     stegpy_parser = image_commands.add_parser(
         "stegpy", help="stegpy 兼容 LSB 隐写嵌入、提取和字典爆破"
     )
@@ -1248,11 +1265,11 @@ def build_parser() -> argparse.ArgumentParser:
     stegpy_brute_parser.add_argument("--json", action="store_true", dest="as_json")
 
     steghide_parser = image_commands.add_parser(
-        "steghide", help="调用 steghide 提取 JPG/BMP/WAV/AU 隐写，支持空密码和字典"
+        "steghide", help="原生 Python 提取 JPG/BMP/WAV/AU steghide 隐写，支持空密码和字典"
     )
     steghide_actions = steghide_parser.add_subparsers(dest="steghide_action", required=True)
     steghide_extract_parser = steghide_actions.add_parser(
-        "extract", help="调用 steghide extract 提取隐藏文件"
+        "extract", help="原生 Python 提取隐藏文件"
     )
     steghide_extract_parser.add_argument("file", type=Path, help="含 steghide 数据的宿主文件")
     steghide_extract_parser.add_argument(
@@ -1267,17 +1284,16 @@ def build_parser() -> argparse.ArgumentParser:
     steghide_extract_parser.add_argument(
         "--no-empty", action="store_true", help="字典模式不先尝试空密码"
     )
-    steghide_extract_parser.add_argument("--steghide", type=Path, help="steghide 可执行文件路径")
     steghide_extract_parser.add_argument(
         "--backend",
         choices=("auto", "native", "tool"),
         default="auto",
-        help="后端：auto 默认先用内置 JPEG/BMP/WAV/AU native，再回退 steghide 工具",
+        help="后端兼容项：auto/native/tool 均走原生 Python",
     )
     steghide_extract_parser.add_argument("--json", action="store_true", dest="as_json")
 
     steghide_brute_parser = steghide_actions.add_parser(
-        "brute", help="用字典循环调用 steghide extract"
+        "brute", help="原生 Python 字典爆破 steghide passphrase"
     )
     steghide_brute_parser.add_argument("file", type=Path, help="含 steghide 数据的宿主文件")
     steghide_brute_parser.add_argument(
@@ -1289,21 +1305,20 @@ def build_parser() -> argparse.ArgumentParser:
     steghide_brute_parser.add_argument("--contains", help="可选：要求输出包含该文本")
     steghide_brute_parser.add_argument("--prefix", help="可选：要求输出以该文本开头")
     steghide_brute_parser.add_argument("--no-empty", action="store_true", help="不先尝试空密码")
-    steghide_brute_parser.add_argument("--steghide", type=Path, help="steghide 可执行文件路径")
     steghide_brute_parser.add_argument(
         "--backend",
         choices=("auto", "native", "tool"),
         default="auto",
-        help="后端：auto 默认先用内置 JPEG/BMP/WAV/AU native，再回退 steghide 工具",
+        help="后端兼容项：auto/native/tool 均走原生 Python",
     )
     steghide_brute_parser.add_argument("--json", action="store_true", dest="as_json")
 
     outguess_parser = image_commands.add_parser(
-        "outguess", help="调用 OutGuess 处理 JPEG/PNM 隐写，支持密钥和字典"
+        "outguess", help="原生 Python 处理 OutGuess JPEG/PNM 隐写，支持密钥和字典"
     )
     outguess_actions = outguess_parser.add_subparsers(dest="outguess_action", required=True)
     outguess_extract_parser = outguess_actions.add_parser(
-        "extract", help="调用 outguess -r 提取隐藏文件"
+        "extract", help="原生 Python 提取隐藏文件"
     )
     outguess_extract_parser.add_argument("file", type=Path, help="含 OutGuess 数据的 JPEG/PNM")
     outguess_extract_parser.add_argument(
@@ -1318,16 +1333,17 @@ def build_parser() -> argparse.ArgumentParser:
     outguess_extract_parser.add_argument(
         "--no-empty", action="store_true", help="字典模式不先尝试空密钥"
     )
-    outguess_extract_parser.add_argument("--outguess", type=Path, help="outguess 可执行文件路径")
     outguess_extract_parser.add_argument(
         "--backend",
         choices=("auto", "native", "tool"),
         default="auto",
-        help="后端：auto 对 PNM/baseline JPEG 用原生实现；native 仅原生；tool 调 outguess",
+        help="后端兼容项：auto/native/tool 均走原生 Python",
     )
     outguess_extract_parser.add_argument("--json", action="store_true", dest="as_json")
 
-    outguess_brute_parser = outguess_actions.add_parser("brute", help="用字典循环调用 outguess -r")
+    outguess_brute_parser = outguess_actions.add_parser(
+        "brute", help="原生 Python 字典爆破 OutGuess key"
+    )
     outguess_brute_parser.add_argument("file", type=Path, help="含 OutGuess 数据的 JPEG/PNM")
     outguess_brute_parser.add_argument(
         "--wordlist", type=Path, required=True, help="密钥字典，一行一个密钥"
@@ -1338,28 +1354,26 @@ def build_parser() -> argparse.ArgumentParser:
     outguess_brute_parser.add_argument("--contains", help="可选：要求输出包含该文本")
     outguess_brute_parser.add_argument("--prefix", help="可选：要求输出以该文本开头")
     outguess_brute_parser.add_argument("--no-empty", action="store_true", help="不先尝试空密钥")
-    outguess_brute_parser.add_argument("--outguess", type=Path, help="outguess 可执行文件路径")
     outguess_brute_parser.add_argument(
         "--backend",
         choices=("auto", "native", "tool"),
         default="auto",
-        help="后端：auto 对 PNM/baseline JPEG 用原生实现；native 仅原生；tool 调 outguess",
+        help="后端兼容项：auto/native/tool 均走原生 Python",
     )
     outguess_brute_parser.add_argument("--json", action="store_true", dest="as_json")
 
-    outguess_hide_parser = outguess_actions.add_parser("hide", help="调用 outguess -d 嵌入文件")
+    outguess_hide_parser = outguess_actions.add_parser("hide", help="原生 Python 嵌入文件")
     outguess_hide_parser.add_argument("file", type=Path, help="输入 JPEG/PNM")
     outguess_hide_parser.add_argument("--payload", type=Path, required=True, help="待隐藏文件")
     outguess_hide_parser.add_argument(
         "-o", "--output", type=Path, required=True, help="输出 JPEG/PNM"
     )
     outguess_hide_parser.add_argument("-k", "--key", default="", help="OutGuess 密钥；默认空密钥")
-    outguess_hide_parser.add_argument("--outguess", type=Path, help="outguess 可执行文件路径")
     outguess_hide_parser.add_argument(
         "--backend",
         choices=("auto", "native", "tool"),
         default="auto",
-        help="后端：auto 对 PNM/baseline JPEG 用原生实现；native 仅原生；tool 调 outguess",
+        help="后端兼容项：auto/native/tool 均走原生 Python",
     )
     outguess_hide_parser.add_argument("--json", action="store_true", dest="as_json")
 
@@ -1508,26 +1522,24 @@ def build_parser() -> argparse.ArgumentParser:
     f5_hide_parser.add_argument("--json", action="store_true", dest="as_json")
 
     jphs_parser = image_commands.add_parser(
-        "jphs", help="JPHS / JPHide+JPSeek JPEG 隐写封装，支持空密码和字典"
+        "jphs", help="原生 Python JPHS / JPHide+JPSeek JPEG 隐写，支持空密码和字典"
     )
     jphs_actions = jphs_parser.add_subparsers(dest="jphs_action", required=True)
-    jphs_hide_parser = jphs_actions.add_parser("hide", help="用纯 Python 或 jphide 嵌入文件到 JPEG")
+    jphs_hide_parser = jphs_actions.add_parser("hide", help="原生 Python 嵌入文件到 JPEG")
     jphs_hide_parser.add_argument("file", type=Path, help="输入 JPEG")
     jphs_hide_parser.add_argument("--payload", type=Path, required=True, help="待隐藏文件")
     jphs_hide_parser.add_argument("-o", "--output", type=Path, required=True, help="输出 JPEG")
     jphs_hide_parser.add_argument("--password", default="", help="JPHS pass phrase；默认空密码")
-    jphs_hide_parser.add_argument("--jphide", type=Path, help="jphide 可执行文件路径")
-    jphs_hide_parser.add_argument("--wine", type=Path, help="运行 jphs05 Windows exe 的 wine 路径")
     jphs_hide_parser.add_argument(
         "--backend",
         choices=("python", "tool", "auto"),
         default="python",
-        help="嵌入后端：默认 python；tool 调 jphide；auto 先 python 后 tool",
+        help="后端兼容项：python/tool/auto 均走原生 Python",
     )
     jphs_hide_parser.add_argument("--json", action="store_true", dest="as_json")
 
     jphs_extract_parser = jphs_actions.add_parser(
-        "extract", help="用纯 Python 或 jpseek 提取隐藏文件"
+        "extract", help="原生 Python 提取隐藏文件"
     )
     jphs_extract_parser.add_argument("file", type=Path, help="含 JPHS 数据的 JPEG")
     jphs_extract_parser.add_argument(
@@ -1540,15 +1552,11 @@ def build_parser() -> argparse.ArgumentParser:
     jphs_extract_parser.add_argument(
         "--no-empty", action="store_true", help="字典模式不先尝试空密码"
     )
-    jphs_extract_parser.add_argument("--jpseek", type=Path, help="jpseek 可执行文件路径")
-    jphs_extract_parser.add_argument(
-        "--wine", type=Path, help="运行 jphs05 Windows exe 的 wine 路径"
-    )
     jphs_extract_parser.add_argument(
         "--backend",
         choices=("python", "tool", "auto"),
         default="python",
-        help="提取后端：默认 python；tool 调 jpseek；auto 先 python 后 tool",
+        help="后端兼容项：python/tool/auto 均走原生 Python",
     )
     jphs_extract_parser.add_argument("--json", action="store_true", dest="as_json")
 
@@ -1561,13 +1569,11 @@ def build_parser() -> argparse.ArgumentParser:
     jphs_brute_parser.add_argument("--contains", help="可选：要求输出包含该文本")
     jphs_brute_parser.add_argument("--prefix", help="可选：要求输出以该文本开头")
     jphs_brute_parser.add_argument("--no-empty", action="store_true", help="不先尝试空密码")
-    jphs_brute_parser.add_argument("--jpseek", type=Path, help="jpseek 可执行文件路径")
-    jphs_brute_parser.add_argument("--wine", type=Path, help="运行 jphs05 Windows exe 的 wine 路径")
     jphs_brute_parser.add_argument(
         "--backend",
-        choices=("python", "tool"),
+        choices=("python", "tool", "auto"),
         default="python",
-        help="爆破后端：默认 python；tool 调 jpseek",
+        help="后端兼容项：python/tool/auto 均走原生 Python",
     )
     jphs_brute_parser.add_argument("--json", action="store_true", dest="as_json")
 
@@ -1764,7 +1770,7 @@ def build_parser() -> argparse.ArgumentParser:
     spammimic_payload.add_argument("--payload", type=Path, help="要隐藏的文件")
     spammimic_encode.add_argument("-o", "--output", type=Path, required=True, help="输出隐写文本")
     spammimic_encode.add_argument(
-        "-p", "--password", help="密码；native 使用本地 XOR 帧，remote 传给 spammimic.com"
+        "-p", "--password", help="密码；使用本地 XOR 帧"
     )
     spammimic_encode.add_argument(
         "--mode",
@@ -1777,7 +1783,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--backend",
         choices=("native", "remote"),
         default="native",
-        help="native 本地；remote 调用 spammimic.com",
+        help="后端兼容项：native/remote 均走原生 Python",
     )
     spammimic_encode.add_argument("--json", action="store_true", dest="as_json")
 
@@ -1801,12 +1807,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--backend",
         choices=("auto", "native", "remote"),
         default="auto",
-        help="auto 先 native 后 remote",
+        help="后端兼容项：auto/native/remote 均走原生 Python",
     )
     spammimic_decode.add_argument("--json", action="store_true", dest="as_json")
 
     snow_parser = text_commands.add_parser(
-        "snow", aliases=["stegsnow"], help="SNOW/stegsnow 行尾空白隐写嵌入、提取和容量估算"
+        "snow", aliases=["stegsnow"], help="原生 Python SNOW/stegsnow 行尾空白隐写嵌入、提取和容量估算"
     )
     snow_actions = snow_parser.add_subparsers(dest="snow_action", required=True)
 
@@ -1818,18 +1824,17 @@ def build_parser() -> argparse.ArgumentParser:
     snow_payload.add_argument("--text", help="要嵌入的 UTF-8 文本")
     snow_payload.add_argument("--payload", type=Path, help="要嵌入的文件")
     snow_hide.add_argument("-o", "--output", type=Path, required=True, help="输出含行尾空白的文本")
-    snow_hide.add_argument("-p", "--password", help="调用 stegsnow 后端时使用 ICE 密码")
+    snow_hide.add_argument("-p", "--password", help="原生 Python password 保护")
     snow_hide.add_argument(
-        "-C", "--compress", action="store_true", help="调用 stegsnow 后端启用 Huffman 压缩"
+        "-C", "--compress", action="store_true", help="原生 Python 压缩载荷"
     )
     snow_hide.add_argument("-l", "--line-length", type=int, default=80, help="最大行宽，默认 80")
     snow_hide.add_argument(
         "--backend",
         choices=("auto", "native", "tool"),
         default="auto",
-        help="auto/native/tool，默认 auto",
+        help="后端兼容项：auto/native/tool 均走原生 Python",
     )
-    snow_hide.add_argument("--snow", type=Path, help="stegsnow/snow 可执行文件路径")
     snow_hide.add_argument("--json", action="store_true", dest="as_json")
 
     snow_extract = snow_actions.add_parser(
@@ -1837,17 +1842,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     snow_extract.add_argument("file", type=Path, help="含 SNOW 行尾空白的文本")
     snow_extract.add_argument("-o", "--output", type=Path, required=True, help="输出载荷文件")
-    snow_extract.add_argument("-p", "--password", help="调用 stegsnow 后端解密")
+    snow_extract.add_argument("-p", "--password", help="原生 Python password 解密")
     snow_extract.add_argument(
-        "-C", "--compress", action="store_true", help="调用 stegsnow 后端解压"
+        "-C", "--compress", action="store_true", help="原生 Python 解压载荷"
     )
     snow_extract.add_argument(
         "--backend",
         choices=("auto", "native", "tool"),
         default="auto",
-        help="auto/native/tool，默认 auto",
+        help="后端兼容项：auto/native/tool 均走原生 Python",
     )
-    snow_extract.add_argument("--snow", type=Path, help="stegsnow/snow 可执行文件路径")
     snow_extract.add_argument("--json", action="store_true", dest="as_json")
 
     snow_capacity = snow_actions.add_parser(
@@ -1966,6 +1970,113 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _add_image_steganography_command(
+    subcommands: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    image_steg_parser = subcommands.add_parser(
+        "image-steganography",
+        aliases=["image-steg", "imgsteg", "img-steg"],
+        help="Image Steganography 1.4.5.2 原生 Difference/Enlarge 隐写",
+    )
+    image_steg_actions = image_steg_parser.add_subparsers(
+        dest="image_steganography_action", required=True
+    )
+
+    hide_parser = image_steg_actions.add_parser(
+        "hide", aliases=["embed", "encode"], help="按原工具 Difference/Enlarge 算法嵌入"
+    )
+    hide_parser.add_argument("file", type=Path, help="输入图片载体")
+    payload = hide_parser.add_mutually_exclusive_group(required=True)
+    payload.add_argument("--text", help="要嵌入的文本；按原工具 ASCII 编码")
+    payload.add_argument("--payload", type=Path, help="要嵌入的文件")
+    hide_parser.add_argument("-o", "--output", type=Path, required=True, help="输出图片")
+    hide_parser.add_argument(
+        "--mode",
+        choices=("enlarge", "difference", "diff"),
+        default="enlarge",
+        help="嵌入模式：enlarge 输出 2 倍图；difference 输出同尺寸差分图",
+    )
+    hide_parser.add_argument("-p", "--password", help="按原工具 AES-CBC/PBKDF2 加密载荷")
+    hide_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    extract_parser = image_steg_actions.add_parser(
+        "extract", aliases=["decode", "reveal"], help="提取 Image Steganography 载荷"
+    )
+    extract_parser.add_argument("file", type=Path, help="含隐写数据的图片")
+    extract_parser.add_argument("-o", "--output", type=Path, required=True, help="输出载荷文件")
+    extract_parser.add_argument(
+        "--mode",
+        choices=("auto", "enlarge", "difference", "diff"),
+        default="auto",
+        help="提取模式；auto 有 --reference 时用 difference，否则用 enlarge",
+    )
+    extract_parser.add_argument("--reference", type=Path, help="difference 模式所需原图")
+    extract_parser.add_argument("-p", "--password", help="AES 解密密码")
+    extract_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    inspect_parser = image_steg_actions.add_parser(
+        "inspect", aliases=["scan", "analyse", "analyze"], help="检查容量与 Enlarge 终止标记"
+    )
+    inspect_parser.add_argument("file", type=Path, help="待检查图片")
+    inspect_parser.add_argument(
+        "--mode",
+        choices=("auto", "enlarge", "difference", "diff"),
+        default="auto",
+        help="检查模式；auto 有 --reference 时用 difference，否则用 enlarge",
+    )
+    inspect_parser.add_argument("--reference", type=Path, help="difference 模式所需原图")
+    inspect_parser.add_argument("--json", action="store_true", dest="as_json")
+
+
+def _add_deegger_command(
+    subcommands: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    deegger_parser = subcommands.add_parser(
+        "deegger",
+        aliases=["deegger-embedder", "de-egger"],
+        help="DeEgger Embedder 1.2.1.1 任意载体追加式隐写提取与嵌入",
+    )
+    deegger_actions = deegger_parser.add_subparsers(dest="deegger_action", required=True)
+
+    inspect_parser = deegger_actions.add_parser(
+        "inspect", aliases=["scan"], help="检查 DeEgger 起止标记、扩展名和多文件 CAB"
+    )
+    inspect_parser.add_argument("file", type=Path, help="待检查载体")
+    inspect_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    extract_parser = deegger_actions.add_parser(
+        "extract", aliases=["decode", "reveal"], help="提取 DeEgger 隐藏文件"
+    )
+    extract_parser.add_argument("file", type=Path, help="含 DeEgger 数据的载体")
+    extract_parser.add_argument("-o", "--output", type=Path, required=True, help="输出文件")
+    extract_parser.add_argument(
+        "--unpack-cab",
+        action="store_true",
+        help="如果载荷是多文件 CAB(.1)，直接解到 --output 目录",
+    )
+    extract_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    extract_files_parser = deegger_actions.add_parser(
+        "extract-files", aliases=["unpack"], help="提取并解包 DeEgger Multi-Hidden CAB"
+    )
+    extract_files_parser.add_argument("file", type=Path, help="含 DeEgger 多文件数据的载体")
+    extract_files_parser.add_argument(
+        "-o", "--output", type=Path, required=True, help="输出目录"
+    )
+    extract_files_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    hide_parser = deegger_actions.add_parser(
+        "hide", aliases=["embed", "encode"], help="按 DeEgger 格式把文件追加到任意载体"
+    )
+    hide_parser.add_argument("file", type=Path, help="输入宿主/载体文件")
+    payload = hide_parser.add_mutually_exclusive_group(required=True)
+    payload.add_argument("--payload", type=Path, action="append", help="待隐藏文件，可重复")
+    payload.add_argument("--text", help="待隐藏 UTF-8 文本")
+    hide_parser.add_argument("-o", "--output", type=Path, required=True, help="输出载体")
+    hide_parser.add_argument("--text-name", default="message.txt", help="--text 的虚拟文件名")
+    hide_parser.add_argument("--json", action="store_true", dest="as_json")
+
+
 def _add_oursecret_command(
     subcommands: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
@@ -2015,6 +2126,11 @@ def _add_oursecret_command(
     hide_parser.add_argument("-o", "--output", type=Path, required=True, help="输出载体")
     hide_parser.add_argument("--password", default="", help="OurSecret 密码标记，默认空密码")
     hide_parser.add_argument("--text-name", default="Message", help="--text 写入 ZIP 的条目名")
+    hide_parser.add_argument(
+        "--no-signature",
+        action="store_true",
+        help="append 模式不写入逆向确认的 40 字节 OurSecret EOF signature",
+    )
     hide_parser.add_argument(
         "--mode",
         choices=("append", "lsb"),
@@ -2203,6 +2319,7 @@ def _add_stego_commands(
 
     _add_wbstego_command(stego_commands)
     _add_oursecret_command(stego_commands)
+    _add_deegger_command(stego_commands)
     _add_silenteye_command(stego_commands)
     _add_deepsound_command(stego_commands)
 
@@ -2248,11 +2365,11 @@ def _add_stego_commands(
     stegpy_brute_parser.add_argument("--json", action="store_true", dest="as_json")
 
     steghide_parser = stego_commands.add_parser(
-        "steghide", help="调用 steghide 提取 JPG/BMP/WAV/AU 隐写，支持空密码和字典"
+        "steghide", help="原生 Python 提取 JPG/BMP/WAV/AU steghide 隐写，支持空密码和字典"
     )
     steghide_actions = steghide_parser.add_subparsers(dest="steghide_action", required=True)
     steghide_extract_parser = steghide_actions.add_parser(
-        "extract", help="调用 steghide extract 提取隐藏文件"
+        "extract", help="原生 Python 提取隐藏文件"
     )
     steghide_extract_parser.add_argument("file", type=Path, help="含 steghide 数据的宿主文件")
     steghide_extract_parser.add_argument(
@@ -2267,17 +2384,16 @@ def _add_stego_commands(
     steghide_extract_parser.add_argument(
         "--no-empty", action="store_true", help="字典模式不先尝试空密码"
     )
-    steghide_extract_parser.add_argument("--steghide", type=Path, help="steghide 可执行文件路径")
     steghide_extract_parser.add_argument(
         "--backend",
         choices=("auto", "native", "tool"),
         default="auto",
-        help="后端：auto 默认先用内置 JPEG/BMP/WAV/AU native，再回退 steghide 工具",
+        help="后端兼容项：auto/native/tool 均走原生 Python",
     )
     steghide_extract_parser.add_argument("--json", action="store_true", dest="as_json")
 
     steghide_brute_parser = steghide_actions.add_parser(
-        "brute", help="用字典循环调用 steghide extract"
+        "brute", help="原生 Python 字典爆破 steghide passphrase"
     )
     steghide_brute_parser.add_argument("file", type=Path, help="含 steghide 数据的宿主文件")
     steghide_brute_parser.add_argument(
@@ -2289,12 +2405,11 @@ def _add_stego_commands(
     steghide_brute_parser.add_argument("--contains", help="可选：要求输出包含该文本")
     steghide_brute_parser.add_argument("--prefix", help="可选：要求输出以该文本开头")
     steghide_brute_parser.add_argument("--no-empty", action="store_true", help="不先尝试空密码")
-    steghide_brute_parser.add_argument("--steghide", type=Path, help="steghide 可执行文件路径")
     steghide_brute_parser.add_argument(
         "--backend",
         choices=("auto", "native", "tool"),
         default="auto",
-        help="后端：auto 默认先用内置 JPEG/BMP/WAV/AU native，再回退 steghide 工具",
+        help="后端兼容项：auto/native/tool 均走原生 Python",
     )
     steghide_brute_parser.add_argument("--json", action="store_true", dest="as_json")
 
@@ -2467,7 +2582,6 @@ def main(argv: list[str] | None = None) -> int:
                     chunk_size=args.chunk_size,
                     max_attempts=args.max_attempts,
                     verify=not args.no_verify,
-                    sevenzip=args.sevenzip,
                 )
             elif args.zip_command in {"nested", "unpack", "unroll"}:
                 result = unpack_nested_archives(
@@ -2477,7 +2591,6 @@ def main(argv: list[str] | None = None) -> int:
                     max_files=args.max_files,
                     max_output_bytes=args.max_output_bytes,
                     password=args.password,
-                    sevenzip=args.sevenzip,
                     flatten_single=args.flatten_single,
                 )
             elif args.zip_command in {"plaintext", "known-plaintext", "bkcrack"}:
@@ -2504,7 +2617,6 @@ def main(argv: list[str] | None = None) -> int:
                         keep_header=args.keep_header,
                         ignore_check_byte=args.ignore_check_byte,
                         jobs=args.jobs,
-                        bkcrack=args.bkcrack,
                         encoding=args.encoding,
                     )
                 elif args.plaintext_action == "attack":
@@ -2523,7 +2635,6 @@ def main(argv: list[str] | None = None) -> int:
                         keep_header=args.keep_header,
                         ignore_check_byte=args.ignore_check_byte,
                         jobs=args.jobs,
-                        bkcrack=args.bkcrack,
                     )
                 elif args.plaintext_action == "keys":
                     result = known_plaintext_attack(
@@ -2532,7 +2643,6 @@ def main(argv: list[str] | None = None) -> int:
                         output=args.output,
                         new_password=args.new_password,
                         decrypt=args.decrypt,
-                        bkcrack=args.bkcrack,
                     )
                 else:
                     result = recover_password_from_keys(
@@ -2542,7 +2652,6 @@ def main(argv: list[str] | None = None) -> int:
                         length=args.length,
                         mask=args.mask,
                         jobs=args.jobs,
-                        bkcrack=args.bkcrack,
                     )
             elif args.zip_command in {"invisible-password", "invisible", "invis-pass"}:
                 result = crack_invisible_archive_password(
@@ -2565,7 +2674,6 @@ def main(argv: list[str] | None = None) -> int:
                     chunk_size=args.chunk_size,
                     max_attempts=args.max_attempts,
                     verify=not args.no_verify,
-                    sevenzip=args.sevenzip,
                 )
             elif args.zip_command in {
                 "timestamp",
@@ -2818,7 +2926,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.output,
                     bitrate=args.bitrate,
                     sample_rate=args.sample_rate,
-                    decoder=args.decoder,
+                    native_library=args.native_library,
                     model_path=args.model_path,
                     randomize_num_samples=args.randomize_num_samples,
                     packet_loss_rate=args.packet_loss_rate,
@@ -2830,7 +2938,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.file,
                     args.output,
                     bitrate=args.bitrate,
-                    encoder=args.encoder,
+                    native_library=args.native_library,
                     model_path=args.model_path,
                     enable_preprocessing=args.enable_preprocessing,
                     enable_dtx=args.enable_dtx,
@@ -2877,7 +2985,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.output,
                     payload_path=args.payload,
                     password=args.password,
-                    encoder=args.encoder,
+                    length_size=args.length_size,
                 )
             elif args.audio_command in {
                 "sstv",
@@ -2921,7 +3029,6 @@ def main(argv: list[str] | None = None) -> int:
                     invert_audio=args.invert_audio,
                     max_seconds=args.max_seconds,
                     raw_output=args.raw_output,
-                    multimon=args.multimon,
                 )
             elif args.audio_command in {"ham", "radio", "aprs", "afsk"}:
                 result = encode_ax25_afsk1200_wav(
@@ -3428,6 +3535,63 @@ def main(argv: list[str] | None = None) -> int:
                     block_size=args.block_size,
                     threshold=args.threshold,
                 )
+            elif args.image_command in {
+                "image-steganography",
+                "image-steg",
+                "imgsteg",
+                "img-steg",
+            } and args.image_steganography_action in {"inspect", "scan", "analyse", "analyze"}:
+                result = inspect_image_steganography(
+                    args.file,
+                    mode=args.mode,
+                    reference_path=args.reference,
+                )
+            elif args.image_command in {
+                "image-steganography",
+                "image-steg",
+                "imgsteg",
+                "img-steg",
+            } and args.image_steganography_action in {"extract", "decode", "reveal"}:
+                result = extract_image_steganography(
+                    args.file,
+                    args.output,
+                    password=args.password,
+                    mode=args.mode,
+                    reference_path=args.reference,
+                )
+            elif args.image_command in {
+                "image-steganography",
+                "image-steg",
+                "imgsteg",
+                "img-steg",
+            }:
+                result = hide_image_steganography(
+                    args.file,
+                    args.output,
+                    text=args.text,
+                    payload_path=args.payload,
+                    password=args.password,
+                    mode=args.mode,
+                )
+            elif args.image_command in {"deegger", "deegger-embedder", "de-egger"}:
+                if args.deegger_action in {"inspect", "scan"}:
+                    result = inspect_deegger(args.file)
+                elif args.deegger_action in {"extract-files", "unpack"}:
+                    result = extract_deegger(args.file, args.output, unpack=True)
+                elif args.deegger_action in {"extract", "decode", "reveal"}:
+                    result = extract_deegger(
+                        args.file,
+                        args.output,
+                        unpack=args.unpack_cab,
+                    )
+                else:
+                    result = hide_deegger(
+                        args.file,
+                        args.output,
+                        payload_paths=args.payload,
+                        text=args.text,
+                        text_name=args.text_name,
+                    )
             elif args.image_command in {"oursecret", "our-secret"} and args.oursecret_action in {
                 "inspect",
                 "scan",
@@ -3453,6 +3617,7 @@ def main(argv: list[str] | None = None) -> int:
                     text_name=args.text_name,
                     password=args.password,
                     mode="lsb" if args.lsb else args.mode,
+                    signature=not args.no_signature,
                 )
             elif args.image_command in {"deepsound", "deep-sound"} and args.deepsound_action in {
                 "analyze",
@@ -3551,7 +3716,6 @@ def main(argv: list[str] | None = None) -> int:
                         args.file,
                         args.wordlist,
                         args.output,
-                        steghide_path=args.steghide,
                         contains=args.contains.encode() if args.contains is not None else None,
                         prefix=args.prefix.encode() if args.prefix is not None else None,
                         include_empty=not args.no_empty,
@@ -3562,7 +3726,6 @@ def main(argv: list[str] | None = None) -> int:
                         args.file,
                         args.output,
                         password=args.password,
-                        steghide_path=args.steghide,
                         backend=args.backend,
                     )
             elif args.image_command == "steghide":
@@ -3570,7 +3733,6 @@ def main(argv: list[str] | None = None) -> int:
                     args.file,
                     args.wordlist,
                     args.output,
-                    steghide_path=args.steghide,
                     contains=args.contains.encode() if args.contains is not None else None,
                     prefix=args.prefix.encode() if args.prefix is not None else None,
                     include_empty=not args.no_empty,
@@ -3582,7 +3744,6 @@ def main(argv: list[str] | None = None) -> int:
                         args.file,
                         args.wordlist,
                         args.output,
-                        outguess_path=args.outguess,
                         backend=args.backend,
                         contains=args.contains.encode() if args.contains is not None else None,
                         prefix=args.prefix.encode() if args.prefix is not None else None,
@@ -3593,7 +3754,6 @@ def main(argv: list[str] | None = None) -> int:
                         args.file,
                         args.output,
                         key=args.key,
-                        outguess_path=args.outguess,
                         backend=args.backend,
                     )
             elif args.image_command == "outguess" and args.outguess_action == "brute":
@@ -3601,7 +3761,6 @@ def main(argv: list[str] | None = None) -> int:
                     args.file,
                     args.wordlist,
                     args.output,
-                    outguess_path=args.outguess,
                     backend=args.backend,
                     contains=args.contains.encode() if args.contains is not None else None,
                     prefix=args.prefix.encode() if args.prefix is not None else None,
@@ -3613,7 +3772,6 @@ def main(argv: list[str] | None = None) -> int:
                     args.output,
                     args.payload,
                     key=args.key,
-                    outguess_path=args.outguess,
                     backend=args.backend,
                 )
             elif args.image_command == "jsteg" and args.jsteg_action in {"reveal", "extract"}:
@@ -3723,8 +3881,6 @@ def main(argv: list[str] | None = None) -> int:
                     args.output,
                     args.payload,
                     password=args.password,
-                    jphide_path=args.jphide,
-                    wine_path=args.wine,
                     backend=args.backend,
                 )
             elif args.image_command == "jphs" and args.jphs_action == "extract":
@@ -3733,9 +3889,7 @@ def main(argv: list[str] | None = None) -> int:
                         args.file,
                         args.wordlist,
                         args.output,
-                        jpseek_path=args.jpseek,
-                        wine_path=args.wine,
-                        backend=args.backend,
+                                backend=args.backend,
                         contains=args.contains.encode() if args.contains is not None else None,
                         prefix=args.prefix.encode() if args.prefix is not None else None,
                         include_empty=not args.no_empty,
@@ -3745,17 +3899,13 @@ def main(argv: list[str] | None = None) -> int:
                         args.file,
                         args.output,
                         password=args.password,
-                        jpseek_path=args.jpseek,
-                        wine_path=args.wine,
-                        backend=args.backend,
+                                backend=args.backend,
                     )
             elif args.image_command == "jphs":
                 result = brute_jphs(
                     args.file,
                     args.wordlist,
                     args.output,
-                    jpseek_path=args.jpseek,
-                    wine_path=args.wine,
                     backend=args.backend,
                     contains=args.contains.encode() if args.contains is not None else None,
                     prefix=args.prefix.encode() if args.prefix is not None else None,
@@ -3887,6 +4037,38 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"命中密码：{result.found_password}")
                     print(f"尝试：{result.attempts}")
                     print(f"写出：{result.written_bytes} bytes")
+            elif result.operation.startswith("image.image-steganography"):
+                print(f"模式：{result.mode}")
+                print(f"容量：{result.capacity_bytes} bytes")
+                if result.reference_path:
+                    print(f"原图：{result.reference_path}")
+                print(f"加密：{result.encrypted}")
+                print(f"终止标记：{result.marker_found}")
+                if result.payload_bytes:
+                    print(f"载荷：{result.payload_bytes} bytes")
+                if result.embedded_bytes:
+                    print(f"嵌入/提取原始：{result.embedded_bytes} bytes")
+                if result.written_bytes:
+                    print(f"写出：{result.written_bytes} bytes")
+            elif result.operation.startswith("stego.deegger"):
+                print(f"标记：{result.marker_found}")
+                print(f"宿主：{result.host_bytes} bytes")
+                print(f"扩展名：{result.extension or '<none>'}")
+                print(f"载荷：{result.payload_bytes} bytes")
+                print(f"嵌入原始：{result.embedded_bytes} bytes")
+                print(f"多文件：{result.multi_file}")
+                if result.unpacked:
+                    print("解包：True")
+                if result.start_offset >= 0:
+                    print(f"起始：0x{result.start_offset:x}")
+                if result.stop_offset >= 0:
+                    print(f"结束：0x{result.stop_offset:x}")
+                if result.written_bytes:
+                    print(f"写出：{result.written_bytes} bytes")
+                if result.entries:
+                    for entry in result.entries:
+                        output = f" -> {entry['output_path']}" if entry.get("output_path") else ""
+                        print(f"{entry['name']} size={entry['size']}{output}")
             elif result.operation.startswith("image.spacefill"):
                 print(f"曲线：{result.curve}")
                 print(f"阶数：{result.order}")
@@ -3953,12 +4135,22 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"ZIP载荷：{result.payload_bytes} bytes")
                 if result.capacity_bytes:
                     print(f"容量：{result.capacity_bytes} bytes")
+                if result.appended_bytes:
+                    print(f"追加段：{result.appended_bytes} bytes")
+                if result.signature_offset is not None:
+                    print(f"OurSecret签名偏移：0x{result.signature_offset:x}")
                 if result.output_paths:
                     print("输出：" + ", ".join(result.output_paths[:5]))
                 if result.written_bytes:
                     print(f"写出：{result.written_bytes} bytes")
                 for entry in result.entries[:10]:
-                    print(f"{entry['name']} size={entry['size']} -> {entry['output_path']}")
+                    if entry.get("kind") == "oursecret-eof-signature":
+                        print(
+                            f"命中：offset=0x{entry['offset']:x} "
+                            f"kind={entry['kind']} size={entry['size']}"
+                        )
+                    else:
+                        print(f"{entry['name']} size={entry['size']} -> {entry['output_path']}")
             elif result.operation.startswith("image.stegpy"):
                 print(f"格式：{result.host_format}")
                 print(f"低位数：{result.bits}")
@@ -4180,7 +4372,6 @@ def main(argv: list[str] | None = None) -> int:
                     compress=args.compress,
                     line_length=args.line_length,
                     backend=args.backend,
-                    snow_path=args.snow,
                 )
             elif args.text_command in {"snow", "stegsnow"} and args.snow_action in {
                 "extract",
@@ -4192,7 +4383,6 @@ def main(argv: list[str] | None = None) -> int:
                     password=args.password,
                     compress=args.compress,
                     backend=args.backend,
-                    snow_path=args.snow,
                 )
             elif args.text_command in {"snow", "stegsnow"}:
                 result = capacity_snow(args.file, line_length=args.line_length)

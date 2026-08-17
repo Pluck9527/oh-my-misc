@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import gzip
 import json
-import stat
-import sys
 from pathlib import Path
 
 from oh_my_misc.cli import main
 from oh_my_misc.mp3stego import (
+    DO_NOTHING,
     _encrypt_mp3stego_bytes,
     _MP3StegoPRNG,
+    _StegoCreateEmbeddedText,
+    _StegoOpenEmbeddedText,
     decode_mp3stego_payload,
+    encode_mp3stego,
     extract_mp3stego,
     inspect_mp3stego,
     parse_mp3_frames,
@@ -139,6 +141,20 @@ def test_mp3stego_decode_payload_rejects_wrong_password(tmp_path: Path) -> None:
         raise AssertionError("wrong password unexpectedly decoded")
 
 
+def test_mp3stego_source_state_machine_roundtrip() -> None:
+    source = _StegoOpenEmbeddedText(b"\x01\x02\x03\x04", password="pass", length_size=4)
+    sink = _StegoCreateEmbeddedText(password="pass", length_size=4, max_payload_bytes=16)
+
+    while not source.finished:
+        hidden_bit = source.get_next_bit()
+        sink.save_hidden_bit(0 if hidden_bit == DO_NOTHING else hidden_bit)
+
+    packet = sink.flush()
+    assert packet.raw == b"\x01\x02\x03\x04"
+    assert packet.embedded_bytes == 4
+    assert packet.selected_bits == 64
+
+
 def test_mp3stego_cli_extract_json(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
     sample = tmp_path / "sample.mp3"
     output = tmp_path / "hidden.txt"
@@ -188,21 +204,30 @@ def test_mp3stego_cli_brute_json(tmp_path: Path, capsys) -> None:  # type: ignor
     assert output.read_bytes() == b"flag{brute-mp3stego}"
 
 
-def test_mp3stego_encode_invokes_external_tool(tmp_path: Path) -> None:
-    encoder = tmp_path / "Encode.exe"
-    script = f"""#!{sys.executable}
-from pathlib import Path
-import sys
-out = Path(sys.argv[-1])
-out.write_bytes(b'MP3')
-print('encoded ' + str(out))
-"""
-    encoder.write_text(script, encoding="utf-8")
-    encoder.chmod(encoder.stat().st_mode | stat.S_IXUSR)
-    wav = tmp_path / "sound.wav"
+def test_mp3stego_native_encode_mp3_roundtrip(tmp_path: Path) -> None:
+    carrier = tmp_path / "carrier.mp3"
     payload = tmp_path / "data.txt"
-    output = tmp_path / "sound.mp3"
-    wav.write_bytes(b"RIFFdemoWAVE")
+    stego = tmp_path / "stego.mp3"
+    output = tmp_path / "out.txt"
+    carrier.write_bytes(b"".join(_mp3_frame([0, 0]) for _ in range(600)))
+    payload.write_text("secret", encoding="utf-8")
+
+    result = encode_mp3stego(carrier, stego, payload_path=payload, password="Canon")
+    extract_mp3stego(stego, output, password="Canon")
+
+    assert result.operation == "audio.mp3stego.encode-native"
+    assert result.executable == "python"
+    assert result.frames == 600
+    assert result.payload_bytes == len(b"secret")
+    assert output.read_bytes() == b"secret"
+
+
+def test_mp3stego_cli_encode_native_ignores_legacy_encoder_option(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    carrier = tmp_path / "carrier.mp3"
+    payload = tmp_path / "data.txt"
+    stego = tmp_path / "stego.mp3"
+    output = tmp_path / "out.txt"
+    carrier.write_bytes(b"".join(_mp3_frame([0, 0]) for _ in range(600)))
     payload.write_text("secret", encoding="utf-8")
 
     assert (
@@ -211,16 +236,34 @@ print('encoded ' + str(out))
                 "audio",
                 "mp3stego",
                 "encode",
-                str(wav),
+                str(carrier),
                 "--payload",
                 str(payload),
-                "--encoder",
-                str(encoder),
                 "-o",
-                str(output),
+                str(stego),
                 "--json",
             ]
         )
         == 0
     )
-    assert output.read_bytes() == b"MP3"
+    data = json.loads(capsys.readouterr().out)
+    assert data["operation"] == "audio.mp3stego.encode-native"
+    assert data["executable"] == "python"
+    extract_mp3stego(stego, output, password="")
+    assert output.read_bytes() == b"secret"
+
+
+def test_mp3stego_native_encode_wav_builds_synthetic_carrier(tmp_path: Path) -> None:
+    wav = tmp_path / "sound.wav"
+    payload = tmp_path / "data.txt"
+    stego = tmp_path / "sound.mp3"
+    output = tmp_path / "out.txt"
+    wav.write_bytes(b"RIFF\x04\x00\x00\x00WAVE")
+    payload.write_text("wav-secret", encoding="utf-8")
+
+    result = encode_mp3stego(wav, stego, payload_path=payload, password="")
+    extract_mp3stego(stego, output, password="")
+
+    assert result.operation == "audio.mp3stego.encode-native"
+    assert result.mode == "encode-native-synthetic"
+    assert output.read_bytes() == b"wav-secret"

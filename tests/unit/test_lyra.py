@@ -1,55 +1,80 @@
 from __future__ import annotations
 
 import json
-import stat
-import sys
 from pathlib import Path
 
+from oh_my_misc import lyra as lyra_module
 from oh_my_misc.cli import main
 from oh_my_misc.lyra import decode_lyra, encode_lyra, inspect_lyra, packet_size_for_bitrate
 
 
-def _fake_decoder(path: Path) -> None:
-    script = f"""#!{sys.executable}
-from __future__ import annotations
-from pathlib import Path
-import sys
-args = {{}}
-for item in sys.argv[1:]:
-    if item.startswith('--') and '=' in item:
-        key, value = item[2:].split('=', 1)
-        args[key] = value
-encoded = Path(args['encoded_path'])
-out_dir = Path(args['output_dir'])
-suffix = args.get('output_suffix', '_decoded')
-out_dir.mkdir(parents=True, exist_ok=True)
-out = out_dir / (encoded.stem + suffix + '.wav')
-out.write_bytes(b'RIFF' + b'lyra-decoded' + args.get('bitrate', '').encode())
-print('decoded ' + str(out))
-"""
-    path.write_text(script, encoding="utf-8")
-    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+class _FakeNativeLyraLibrary:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.calls: list[dict[str, object]] = []
+
+    def version(self) -> str:
+        return "fake-google-lyra-capi"
+
+    def decode_file(
+        self,
+        input_path: Path,
+        output_path: Path,
+        *,
+        sample_rate: int,
+        bitrate: int,
+        randomize_num_samples: bool,
+        packet_loss_rate: float,
+        average_burst_length: float,
+        fixed_starts: list[float],
+        fixed_durations: list[float],
+        model_path: Path,
+    ) -> None:
+        self.calls.append(
+            {
+                "mode": "decode",
+                "input_path": input_path,
+                "output_path": output_path,
+                "sample_rate": sample_rate,
+                "bitrate": bitrate,
+                "randomize_num_samples": randomize_num_samples,
+                "packet_loss_rate": packet_loss_rate,
+                "average_burst_length": average_burst_length,
+                "fixed_starts": fixed_starts,
+                "fixed_durations": fixed_durations,
+                "model_path": model_path,
+            }
+        )
+        output_path.write_bytes(b"RIFF" + b"lyra-decoded" + str(bitrate).encode())
+
+    def encode_file(
+        self,
+        input_path: Path,
+        output_path: Path,
+        *,
+        bitrate: int,
+        enable_preprocessing: bool,
+        enable_dtx: bool,
+        model_path: Path,
+    ) -> None:
+        self.calls.append(
+            {
+                "mode": "encode",
+                "input_path": input_path,
+                "output_path": output_path,
+                "bitrate": bitrate,
+                "enable_preprocessing": enable_preprocessing,
+                "enable_dtx": enable_dtx,
+                "model_path": model_path,
+            }
+        )
+        output_path.write_bytes(b"L" * 16)
 
 
-def _fake_encoder(path: Path) -> None:
-    script = f"""#!{sys.executable}
-from __future__ import annotations
-from pathlib import Path
-import sys
-args = {{}}
-for item in sys.argv[1:]:
-    if item.startswith('--') and '=' in item:
-        key, value = item[2:].split('=', 1)
-        args[key] = value
-source = Path(args['input_path'])
-out_dir = Path(args['output_dir'])
-out_dir.mkdir(parents=True, exist_ok=True)
-out = out_dir / (source.stem + '.lyra')
-out.write_bytes(b'L' * 16)
-print('encoded ' + str(out))
-"""
-    path.write_text(script, encoding="utf-8")
-    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+def _patch_fake_library(monkeypatch, tmp_path: Path) -> _FakeNativeLyraLibrary:  # type: ignore[no-untyped-def]
+    fake = _FakeNativeLyraLibrary(tmp_path / "libomm_lyra_native.so")
+    monkeypatch.setattr(lyra_module, "_load_native_library", lambda explicit=None: fake)
+    return fake
 
 
 def test_lyra_packet_size_matches_google_cli_bitrates() -> None:
@@ -70,6 +95,7 @@ def test_lyra_inspect_lists_packet_candidates(tmp_path: Path) -> None:
     assert result.packet_count == 3
     assert result.trailing_bytes == 0
     assert result.duration_seconds == 0.06
+    assert result.backend == "native-wrapper"
     exact = [candidate["bitrate"] for candidate in result.candidates if candidate["exact"]]
     assert exact == [3200]
 
@@ -85,43 +111,58 @@ def test_lyra_cli_inspect_json(tmp_path: Path, capsys) -> None:  # type: ignore[
     assert data["bitrate"] == 6000
     assert data["packet_size"] == 15
     assert data["packet_count"] == 3
+    assert data["backend"] == "native-wrapper"
 
 
-def test_lyra_decode_invokes_external_decoder(tmp_path: Path) -> None:
-    decoder = tmp_path / "decoder_main"
-    _fake_decoder(decoder)
+def test_lyra_decode_uses_native_wrapper(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    fake = _patch_fake_library(monkeypatch, tmp_path)
     encoded = tmp_path / "message.lyra"
     encoded.write_bytes(b"B" * 16)
     output = tmp_path / "message.wav"
 
-    result = decode_lyra(encoded, output, decoder=decoder, bitrate=3200, sample_rate=16000)
+    result = decode_lyra(
+        encoded,
+        output,
+        native_library=fake.path,
+        bitrate=3200,
+        sample_rate=16000,
+        packet_loss_rate=0.25,
+        fixed_packet_loss_pattern="0,0.02,1.5,0.04",
+    )
 
     assert result.operation == "audio.lyra.decode"
     assert result.packet_size == 8
     assert result.packet_count == 2
     assert result.returncode == 0
+    assert result.executable == str(fake.path)
+    assert result.library_path == str(fake.path)
+    assert result.command[:2] == ["native-lyra", "decode"]
     assert output.read_bytes() == b"RIFFlyra-decoded3200"
-    assert any(part == "--output_suffix=" for part in result.command)
+    assert fake.calls[0]["fixed_starts"] == [0.0, 1.5]
+    assert fake.calls[0]["fixed_durations"] == [0.02, 0.04]
 
 
-def test_lyra_encode_invokes_external_encoder(tmp_path: Path) -> None:
-    encoder = tmp_path / "encoder_main"
-    _fake_encoder(encoder)
+def test_lyra_encode_uses_native_wrapper(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    fake = _patch_fake_library(monkeypatch, tmp_path)
     wav = tmp_path / "speech.wav"
     wav.write_bytes(b"RIFFdemoWAVE")
     output = tmp_path / "speech.lyra"
 
-    result = encode_lyra(wav, output, encoder=encoder, bitrate=3200)
+    result = encode_lyra(wav, output, native_library=fake.path, bitrate=3200)
 
     assert result.operation == "audio.lyra.encode"
     assert result.written_bytes == 16
     assert result.packet_count == 2
+    assert result.backend == "native-wrapper"
+    assert result.command[:2] == ["native-lyra", "encode"]
     assert output.read_bytes() == b"L" * 16
+    assert fake.calls[0]["mode"] == "encode"
 
 
-def test_lyra_cli_decode_json(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
-    decoder = tmp_path / "decoder_main"
-    _fake_decoder(decoder)
+def test_lyra_cli_decode_json_uses_native_wrapper(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:  # type: ignore[no-untyped-def]
+    fake = _patch_fake_library(monkeypatch, tmp_path)
     encoded = tmp_path / "clip.lyra"
     encoded.write_bytes(b"C" * 16)
     output = tmp_path / "clip.wav"
@@ -133,8 +174,8 @@ def test_lyra_cli_decode_json(tmp_path: Path, capsys) -> None:  # type: ignore[n
                 "lyra",
                 "decode",
                 str(encoded),
-                "--decoder",
-                str(decoder),
+                "--library",
+                str(fake.path),
                 "--bitrate",
                 "3200",
                 "-o",
@@ -147,5 +188,42 @@ def test_lyra_cli_decode_json(tmp_path: Path, capsys) -> None:  # type: ignore[n
 
     data = json.loads(capsys.readouterr().out)
     assert data["operation"] == "audio.lyra.decode"
+    assert data["backend"] == "native-wrapper"
+    assert data["library_path"] == str(fake.path)
     assert data["output_path"] == str(output)
     assert output.exists()
+
+
+def test_lyra_cli_encode_json_uses_native_wrapper(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:  # type: ignore[no-untyped-def]
+    fake = _patch_fake_library(monkeypatch, tmp_path)
+    wav = tmp_path / "clip.wav"
+    wav.write_bytes(b"RIFFdemoWAVE")
+    output = tmp_path / "clip.lyra"
+
+    assert (
+        main(
+            [
+                "audio",
+                "lyra",
+                "encode",
+                str(wav),
+                "--library",
+                str(fake.path),
+                "--bitrate",
+                "3200",
+                "-o",
+                str(output),
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    data = json.loads(capsys.readouterr().out)
+    assert data["operation"] == "audio.lyra.encode"
+    assert data["backend"] == "native-wrapper"
+    assert data["library_path"] == str(fake.path)
+    assert data["output_path"] == str(output)
+    assert output.read_bytes() == b"L" * 16
