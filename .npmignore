@@ -1,12 +1,14 @@
 __pycache__/
+**/__pycache__/
 *.py[cod]
+**/*.py[cod]
 .pytest_cache/
 .ruff_cache/
 .venv/
+.codex/
+muteki/
+tests/
 dist/
 build/
 *.egg-info/
 *.tgz
-.coverage
-htmlcov/
-.codex/transaction/

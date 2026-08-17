@@ -1,0 +1,47 @@
+{
+  "name": "oh-my-misc",
+  "version": "0.1.0",
+  "description": "Native CTF Misc analysis and forensics CLI toolkit, packaged for npm.",
+  "license": "GPL-3.0-only",
+  "type": "commonjs",
+  "bin": {
+    "omm": "bin/omm.js",
+    "oh-my-misc": "bin/omm.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "pyproject.toml",
+    "README.md",
+    "LICENSE",
+    "uv.lock",
+    "!src/**/__pycache__/",
+    "!src/**/*.pyc",
+    "!src/**/*.pyo"
+  ],
+  "scripts": {
+    "test": "node --check bin/omm.js && npm pack --dry-run --json"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "ctf",
+    "misc",
+    "forensics",
+    "steganography",
+    "cli",
+    "python"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Pluck9527/oh-my-misc.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Pluck9527/oh-my-misc/issues"
+  },
+  "homepage": "https://github.com/Pluck9527/oh-my-misc#readme",
+  "publishConfig": {
+    "access": "public"
+  }
+}

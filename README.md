@@ -12,6 +12,31 @@ python3 -m venv .venv
 python -m pip install -e '.[dev]'
 ```
 
+## Install from npm
+
+The npm package is a thin Node.js launcher that ships the Python project source,
+creates a cached Python virtual environment on first run, installs this package
+into that environment, and forwards all arguments to `python -m oh_my_misc`.
+
+Requirements:
+
+- Node.js 18+
+- Python 3.11+
+
+```bash
+npm install -g oh-my-misc
+omm --version
+
+# Or run without a global install.
+npx oh-my-misc --help
+```
+
+Useful environment variables:
+
+- `OH_MY_MISC_PYTHON=/path/to/python` chooses the Python interpreter.
+- `OH_MY_MISC_NPM_CACHE=/path/to/cache` chooses the virtualenv cache directory.
+- `OH_MY_MISC_NPM_REINSTALL=1` rebuilds the cached virtualenv for the next run.
+
 ## Current CLI
 
 ```bash
