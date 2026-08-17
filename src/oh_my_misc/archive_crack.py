@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import itertools
+import lzma
 import os
-import shutil
-import subprocess
+import tempfile
 import time
 import zipfile
 import zlib
@@ -11,6 +11,9 @@ from collections.abc import Iterable, Iterator
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import asdict, dataclass
 from pathlib import Path
+
+import py7zr
+from py7zr import exceptions as py7zr_exceptions
 
 from oh_my_misc.zip_crc import BYTE_ALPHABETS
 
@@ -116,13 +119,13 @@ def crack_archive_password(
                 verify=verify,
                 started=started,
             )
-            if result.found_password or backend == "native":
+            if result.found_password or backend == "native" or not _looks_like_7z(archive_path):
                 return result
         except ValueError:
-            if backend == "native":
+            if backend == "native" or not _looks_like_7z(archive_path):
                 raise
             selected_backend = "7z"
-    return _crack_with_7z(
+    return _crack_7z_native(
         archive_path,
         output_dir,
         wordlist=wordlist,
@@ -183,11 +186,11 @@ def crack_archive_password_candidates(
                 operation=operation,
             )
         except ValueError:
-            if backend == "native":
+            if backend == "native" or not _looks_like_7z(archive_path):
                 raise
             selected_backend = "7z"
             chunks = _chunk_candidates(candidates, chunk_size=chunk_size, max_attempts=max_attempts)
-    return _crack_7z_candidate_chunks(
+    return _crack_native_7z_candidate_chunks(
         archive_path,
         output_dir,
         chunks=chunks,
@@ -265,7 +268,7 @@ def _crack_zip_native(
     )
 
 
-def _crack_with_7z(
+def _crack_7z_native(
     archive_path: Path,
     output_dir: Path | None,
     *,
@@ -283,7 +286,8 @@ def _crack_with_7z(
     sevenzip: Path | None,
     started: float,
 ) -> ArchiveCrackResult:
-    tool = _find_7z(sevenzip)
+    _ = sevenzip
+    _check_7z_archive(archive_path)
     found, attempts = _run_parallel_search(
         _candidate_chunks(
             wordlist=wordlist,
@@ -298,23 +302,15 @@ def _crack_with_7z(
             max_attempts=max_attempts,
         ),
         workers,
-        _sevenzip_worker,
-        (str(archive_path), tool, encoding),
+        _native_7z_worker,
+        (str(archive_path), encoding),
     )
     extracted, output_paths, written = False, [], 0
     if found and output_dir is not None:
-        output_dir.mkdir(parents=True, exist_ok=True)
         password = _decode_password(found, encoding)
-        proc = subprocess.run(
-            [tool, "x", f"-p{password}", "-y", f"-o{output_dir}", str(archive_path)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        if proc.returncode != 0:
-            raise ValueError("密码命中，但 7z 解压失败")
+        extracted_paths = _extract_7z_archive_native(archive_path, output_dir, password=password)
         extracted = True
-        output_paths = [str(path) for path in sorted(output_dir.rglob("*")) if path.is_file()]
+        output_paths = [str(path) for path in sorted(extracted_paths)]
         written = sum(path.stat().st_size for path in output_dir.rglob("*") if path.is_file())
     elapsed = max(time.perf_counter() - started, 0.000001)
     return ArchiveCrackResult(
@@ -322,8 +318,8 @@ def _crack_with_7z(
         input_path=str(archive_path),
         output_path=str(output_dir) if output_dir is not None else "-",
         output_paths=output_paths,
-        backend="7z",
-        archive_format=archive_path.suffix.lower().lstrip(".") or "archive",
+        backend="native-7z",
+        archive_format="7z",
         encrypted=True,
         entry="-",
         found_password=_decode_password(found, encoding) if found else "",
@@ -381,7 +377,7 @@ def _crack_zip_native_candidate_chunks(
     )
 
 
-def _crack_7z_candidate_chunks(
+def _crack_native_7z_candidate_chunks(
     archive_path: Path,
     output_dir: Path | None,
     *,
@@ -392,24 +388,17 @@ def _crack_7z_candidate_chunks(
     encoding: str,
     operation: str,
 ) -> ArchiveCrackResult:
-    tool = _find_7z(sevenzip)
+    _ = sevenzip
+    _check_7z_archive(archive_path)
     found, attempts = _run_parallel_search(
-        chunks, workers, _sevenzip_worker, (str(archive_path), tool, encoding)
+        chunks, workers, _native_7z_worker, (str(archive_path), encoding)
     )
     extracted, output_paths, written = False, [], 0
     if found and output_dir is not None:
-        output_dir.mkdir(parents=True, exist_ok=True)
         password = _decode_password(found, encoding)
-        proc = subprocess.run(
-            [tool, "x", f"-p{password}", "-y", f"-o{output_dir}", str(archive_path)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        if proc.returncode != 0:
-            raise ValueError("密码命中，但 7z 解压失败")
+        extracted_paths = _extract_7z_archive_native(archive_path, output_dir, password=password)
         extracted = True
-        output_paths = [str(path) for path in sorted(output_dir.rglob("*")) if path.is_file()]
+        output_paths = [str(path) for path in sorted(extracted_paths)]
         written = sum(path.stat().st_size for path in output_dir.rglob("*") if path.is_file())
     elapsed = max(time.perf_counter() - started, 0.000001)
     return ArchiveCrackResult(
@@ -417,8 +406,8 @@ def _crack_7z_candidate_chunks(
         input_path=str(archive_path),
         output_path=str(output_dir) if output_dir is not None else "-",
         output_paths=output_paths,
-        backend="7z",
-        archive_format=archive_path.suffix.lower().lstrip(".") or "archive",
+        backend="native-7z",
+        archive_format="7z",
         encrypted=True,
         entry="-",
         found_password=_decode_password(found, encoding) if found else "",
@@ -486,18 +475,12 @@ def _native_worker(
     return None, len(candidates)
 
 
-def _sevenzip_worker(
-    candidates: list[bytes], archive_path: str, tool: str, encoding: str
+def _native_7z_worker(
+    candidates: list[bytes], archive_path: str, encoding: str
 ) -> tuple[bytes | None, int]:
     for index, password in enumerate(candidates, 1):
         text = _decode_password(password, encoding)
-        proc = subprocess.run(
-            [tool, "t", f"-p{text}", "-y", archive_path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        if proc.returncode == 0:
+        if _verify_7z_password(Path(archive_path), text):
             return password, index
     return None, len(candidates)
 
@@ -611,7 +594,7 @@ def _read_zipcrypto_target(archive_path: Path) -> _ZipTarget:
             raise ValueError("ZIP 没有加密条目")
         info = encrypted[0]
         if info.compress_type == 99:
-            raise ValueError("检测到 WinZip AES，native 后端不支持；请用 --backend 7z")
+            raise ValueError("检测到 WinZip AES，原生 ZipCrypto 后端不支持")
         verifier = (
             ((info._raw_time >> 8) & 0xFF) if info.flag_bits & 0x08 else ((info.CRC >> 24) & 0xFF)
         )
@@ -657,6 +640,49 @@ def _verify_zip_password(archive_path: str, entry: str, password: bytes) -> bool
         return False
 
 
+def _verify_7z_password(archive_path: Path, password: str) -> bool:
+    with tempfile.TemporaryDirectory(prefix="omm-7z-test-") as directory:
+        try:
+            _extract_7z_archive_native(archive_path, Path(directory), password=password)
+            return True
+        except ValueError:
+            return False
+
+
+def _extract_7z_archive_native(
+    archive_path: Path, output_dir: Path, *, password: str | None
+) -> list[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    before = {path.resolve() for path in output_dir.rglob("*") if path.is_file()}
+    try:
+        with py7zr.SevenZipFile(archive_path, mode="r", password=password) as archive:
+            for name in archive.getnames():
+                _safe_join(output_dir, name.replace("\\", "/"))
+            archive.extractall(path=output_dir)
+    except py7zr_exceptions.PasswordRequired as error:
+        raise ValueError("7z 解压失败，需要密码") from error
+    except (
+        py7zr_exceptions.ArchiveError,
+        py7zr_exceptions.DecompressionError,
+        py7zr_exceptions.UnsupportedCompressionMethodError,
+        lzma.LZMAError,
+        OSError,
+    ) as error:
+        raise ValueError(f"7z 原生解压失败：{error}") from error
+    after = [path for path in output_dir.rglob("*") if path.is_file()]
+    for path in after:
+        _safe_join(output_dir, str(path.relative_to(output_dir)))
+    return [path for path in after if path.resolve() not in before]
+
+
+def _safe_join(root: Path, name: str) -> Path:
+    target = (root / name).resolve()
+    root_resolved = root.resolve()
+    if target != root_resolved and root_resolved not in target.parents:
+        raise ValueError(f"压缩包条目路径越界：{name}")
+    return target
+
+
 def _zipcrypto_init(password: bytes) -> list[int]:
     keys = [0x12345678, 0x23456789, 0x34567890]
     for value in password:
@@ -691,20 +717,19 @@ def zipcrypto_encrypt_for_test(password: bytes, plaintext: bytes, verifier: int)
     return bytes(out)
 
 
-def _find_7z(sevenzip: Path | None) -> str:
-    if sevenzip is not None:
-        _check_file(sevenzip, "7z 可执行文件")
-        return str(sevenzip)
-    for name in ("7zz", "7z"):
-        found = shutil.which(name)
-        if found:
-            return found
-    raise ValueError("未找到 7z/7zz；请安装 7-Zip 或使用 --backend native 处理 ZipCrypto ZIP")
-
-
 def _looks_like_zip(path: Path) -> bool:
     with path.open("rb") as handle:
         return handle.read(4) == b"PK\x03\x04"
+
+
+def _looks_like_7z(path: Path) -> bool:
+    with path.open("rb") as handle:
+        return handle.read(6) == b"7z\xbc\xaf'\x1c"
+
+
+def _check_7z_archive(path: Path) -> None:
+    if not _looks_like_7z(path):
+        raise ValueError("原生 7z 后端只支持 7z 文件")
 
 
 def _decode_password(password: bytes, encoding: str) -> str:

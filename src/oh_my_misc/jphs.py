@@ -1,12 +1,8 @@
 from __future__ import annotations
 
-import shutil
-import subprocess
-import tempfile
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from sys import platform
 
 from Crypto.Cipher import Blowfish
 
@@ -110,46 +106,14 @@ def hide_jphs(
     wine_path: Path | None = None,
     backend: str = "python",
 ) -> JphsResult:
-    """Embed JPHS data with the Python backend or original jphide executable."""
+    """Embed JPHS data with the native Python backend."""
 
     _check_file(input_path, "JPEG 文件")
     _check_file(payload_path, "载荷文件")
     if backend not in {"tool", "python", "auto"}:
         raise ValueError("backend 必须是 tool、python 或 auto")
-    if backend in {"python", "auto"}:
-        try:
-            return hide_jphs_python(input_path, output_path, payload_path, password=password)
-        except (OSError, ValueError) as error:
-            if backend == "python":
-                raise
-            python_error = error
-    else:
-        python_error = None
-    command, tool, runner = _resolve_tool("jphide", jphide_path, wine_path=wine_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    completed = _run_tool(
-        [*command, str(input_path), str(output_path), str(payload_path)],
-        password,
-        repeat_password=True,
-    )
-    if completed.returncode != 0:
-        detail = _tool_error("jphide", completed)
-        if python_error is not None:
-            detail = f"Python 后端失败：{python_error}；{detail}"
-        raise ValueError(detail)
-    return JphsResult(
-        operation="image.jphs.hide",
-        input_path=str(input_path),
-        output_path=str(output_path),
-        output_paths=[str(output_path)],
-        tool_path=tool,
-        runner_path=runner,
-        password_used=bool(password),
-        found_password=password if password else None,
-        written_bytes=output_path.stat().st_size if output_path.exists() else 0,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
-    )
+    _ = (jphide_path, wine_path)
+    return hide_jphs_python(input_path, output_path, payload_path, password=password)
 
 
 def hide_jphs_python(
@@ -191,42 +155,13 @@ def extract_jphs(
     wine_path: Path | None = None,
     backend: str = "python",
 ) -> JphsResult:
-    """Extract JPHS data with the pure Python backend or original jpseek executable."""
+    """Extract JPHS data with the native Python backend."""
 
     _check_file(input_path, "JPEG 文件")
     if backend not in {"tool", "python", "auto"}:
         raise ValueError("backend 必须是 tool、python 或 auto")
-    if backend in {"python", "auto"}:
-        try:
-            return extract_jphs_python(input_path, output_path, password=password)
-        except (OSError, ValueError) as error:
-            if backend == "python":
-                raise
-            python_error = error
-    else:
-        python_error = None
-    command, tool, runner = _resolve_tool("jpseek", jpseek_path, wine_path=wine_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    completed = _run_tool([*command, str(input_path), str(output_path)], password)
-    if completed.returncode != 0:
-        detail = _tool_error("jpseek", completed)
-        if python_error is not None:
-            detail = f"Python 后端失败：{python_error}；{detail}"
-        raise ValueError(detail)
-    return JphsResult(
-        operation="image.jphs.extract",
-        input_path=str(input_path),
-        output_path=str(output_path),
-        output_paths=[str(output_path)],
-        tool_path=tool,
-        runner_path=runner,
-        password_used=bool(password),
-        found_password=password if password else None,
-        attempts=1,
-        written_bytes=output_path.stat().st_size if output_path.exists() else 0,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
-    )
+    _ = (jpseek_path, wine_path)
+    return extract_jphs_python(input_path, output_path, password=password)
 
 
 def extract_jphs_python(
@@ -335,54 +270,17 @@ def brute_jphs(
 
     _check_file(input_path, "JPEG 文件")
     _check_file(wordlist_path, "字典")
-    if backend == "python":
-        return _brute_jphs_python(
-            input_path,
-            wordlist_path,
-            output_path,
-            contains=contains,
-            prefix=prefix,
-            include_empty=include_empty,
-        )
-    command, tool, runner = _resolve_tool("jpseek", jpseek_path, wine_path=wine_path)
-    attempts = 0
-    last_error = ""
-    with tempfile.TemporaryDirectory(prefix="omm-jphs-") as directory:
-        tmp_output = Path(directory) / "candidate.bin"
-        for candidate in _password_candidates(wordlist_path, include_empty=include_empty):
-            attempts += 1
-            if tmp_output.exists():
-                tmp_output.unlink()
-            completed = _run_tool([*command, str(input_path), str(tmp_output)], candidate)
-            if completed.returncode != 0:
-                last_error = _tool_error("jpseek", completed)
-                continue
-            if not tmp_output.exists():
-                last_error = "jpseek 没有写出文件"
-                continue
-            payload = tmp_output.read_bytes()
-            if contains is not None and contains not in payload:
-                continue
-            if prefix is not None and not payload.startswith(prefix):
-                continue
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(payload)
-            return JphsResult(
-                operation="image.jphs.brute",
-                input_path=str(input_path),
-                output_path=str(output_path),
-                output_paths=[str(output_path)],
-                tool_path=tool,
-                runner_path=runner,
-                password_used=bool(candidate),
-                found_password=candidate,
-                attempts=attempts,
-                written_bytes=len(payload),
-                stdout=completed.stdout,
-                stderr=completed.stderr,
-            )
-    extra = f"；最后错误：{last_error}" if last_error else ""
-    raise ValueError(f"JPHS 字典爆破失败，尝试 {attempts} 个密码{extra}")
+    if backend not in {"tool", "python", "auto"}:
+        raise ValueError("backend 必须是 tool、python 或 auto")
+    _ = (jpseek_path, wine_path)
+    return _brute_jphs_python(
+        input_path,
+        wordlist_path,
+        output_path,
+        contains=contains,
+        prefix=prefix,
+        include_empty=include_empty,
+    )
 
 
 def _brute_jphs_python(
@@ -428,9 +326,7 @@ def _brute_jphs_python(
 
 class _JphsState:
     def __init__(self, coefficients: list[list[list[int]]], password: str):
-        if not password:
-            raise ValueError("纯 Python JPHS 后端需要 passphrase；jphs05 空密码样本请用 tool 后端")
-        key = password.encode("utf-8")
+        key = password.encode("utf-8") or b"\x00\x00\x00\x00"
         try:
             self.cipher = Blowfish.new(key, Blowfish.MODE_ECB)
         except ValueError as error:
@@ -560,80 +456,6 @@ def _demerge_word(word: int, mode: int) -> int:
     if mode < 0:
         return (value & 2) >> 1
     return value & 1
-
-
-def _resolve_tool(
-    name: str,
-    configured: Path | None,
-    *,
-    wine_path: Path | None,
-) -> tuple[list[str], str, str | None]:
-    if configured is not None:
-        if not configured.is_file():
-            raise FileNotFoundError(f"{name} 不存在：{configured}")
-        tool = str(configured)
-    else:
-        found = _which_jphs_tool(name)
-        if found is None:
-            raise FileNotFoundError(
-                f"找不到 {name}/{name}.exe；请安装 JPHS/JPHide+JPSeek、jphs05，"
-                f"或用 --{name} 指定可执行文件"
-            )
-        tool = found
-    if _needs_wine(tool):
-        wine = _resolve_wine(wine_path)
-        return [wine, tool], tool, wine
-    return [tool], tool, None
-
-
-def _which_jphs_tool(name: str) -> str | None:
-    found = shutil.which(name)
-    if found is not None:
-        return found
-    exe_name = f"{name}.exe"
-    found = shutil.which(exe_name)
-    if found is not None:
-        return found
-    return shutil.which(exe_name.upper())
-
-
-def _needs_wine(tool: str) -> bool:
-    return Path(tool).suffix.lower() == ".exe" and not platform.startswith("win")
-
-
-def _resolve_wine(configured: Path | None) -> str:
-    if configured is not None:
-        if not configured.is_file():
-            raise FileNotFoundError(f"wine 不存在：{configured}")
-        return str(configured)
-    found = shutil.which("wine")
-    if found is None:
-        raise FileNotFoundError("检测到 Windows .exe，需要安装 wine 或用 --wine 指定 wine")
-    return found
-
-
-def _run_tool(
-    args: list[str],
-    password: str,
-    *,
-    repeat_password: bool = False,
-) -> subprocess.CompletedProcess[str]:
-    stdin = f"{password}\n"
-    if repeat_password:
-        stdin += f"{password}\n"
-    return subprocess.run(
-        args,
-        input=stdin,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=120,
-    )
-
-
-def _tool_error(tool: str, completed: subprocess.CompletedProcess[str]) -> str:
-    details = (completed.stderr or completed.stdout).strip()
-    return f"{tool} 失败，exit={completed.returncode}" + (f"：{details}" if details else "")
 
 
 def _password_candidates(wordlist_path: Path, *, include_empty: bool) -> list[str]:

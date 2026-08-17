@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import shutil
-import subprocess
-import tempfile
 import wave
 import zlib
 from dataclasses import asdict, dataclass
@@ -20,7 +17,7 @@ class SteghideResult:
     output_paths: list[str]
     tool_path: str
     password_used: bool
-    backend: str = "tool"
+    backend: str = "native"
     carrier_format: str = ""
     embedded_name: str = ""
     encrypted: bool = False
@@ -55,78 +52,30 @@ def extract_steghide(
     steghide_path: Path | None = None,
     backend: str = "auto",
 ) -> SteghideResult:
-    """Extract a steghide payload; native JPEG/BMP/WAV/AU extraction is tried before tool fallback."""
+    """Extract a steghide payload with the native Python backend."""
 
     _check_file(input_path, "宿主文件")
     _check_backend(backend)
-    native_error: Exception | None = None
-    if backend in {"auto", "native"} and steghide_path is None:
-        try:
-            payload = extract_steghide_native(input_path, password=password)
-        except (OSError, ValueError) as error:
-            native_error = error
-            if backend == "native":
-                raise
-        else:
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(payload.data)
-            return SteghideResult(
-                operation="image.steghide.extract-native",
-                input_path=str(input_path),
-                output_path=str(output_path),
-                output_paths=[str(output_path)],
-                tool_path="python",
-                backend="native",
-                carrier_format=payload.carrier_format,
-                embedded_name=payload.embedded_name,
-                password_used=bool(password),
-                found_password=password if password else "",
-                attempts=1,
-                written_bytes=len(payload.data),
-                encrypted=payload.encrypted,
-                compressed=payload.compressed,
-                checksum_ok=payload.checksum_ok,
-            )
-    elif backend == "native":
-        payload = extract_steghide_native(input_path, password=password)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(payload.data)
-        return SteghideResult(
-            operation="image.steghide.extract-native",
-            input_path=str(input_path),
-            output_path=str(output_path),
-            output_paths=[str(output_path)],
-            tool_path="python",
-            backend="native",
-            carrier_format=payload.carrier_format,
-            embedded_name=payload.embedded_name,
-            password_used=bool(password),
-            found_password=password if password else "",
-            attempts=1,
-            written_bytes=len(payload.data),
-            encrypted=payload.encrypted,
-            compressed=payload.compressed,
-            checksum_ok=payload.checksum_ok,
-        )
-
-    tool = _resolve_tool_or_native_error(steghide_path, native_error)
+    _ = steghide_path
+    payload = extract_steghide_native(input_path, password=password)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    completed = _run_steghide_extract(tool, input_path, output_path, password)
-    if completed.returncode != 0:
-        raise ValueError(_tool_error(completed))
+    output_path.write_bytes(payload.data)
     return SteghideResult(
-        operation="image.steghide.extract",
+        operation="image.steghide.extract-native",
         input_path=str(input_path),
         output_path=str(output_path),
         output_paths=[str(output_path)],
-        tool_path=tool,
-        backend="tool",
+        tool_path="python",
+        backend="native",
+        carrier_format=payload.carrier_format,
+        embedded_name=payload.embedded_name,
         password_used=bool(password),
         found_password=password if password else "",
         attempts=1,
-        written_bytes=output_path.stat().st_size if output_path.exists() else 0,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
+        written_bytes=len(payload.data),
+        encrypted=payload.encrypted,
+        compressed=payload.compressed,
+        checksum_ok=payload.checksum_ok,
     )
 
 
@@ -146,85 +95,41 @@ def brute_steghide(
     _check_file(input_path, "宿主文件")
     _check_file(wordlist_path, "字典")
     _check_backend(backend)
+    _ = steghide_path
     attempts = 0
     last_error = ""
-    native_attempted = False
-    if backend in {"auto", "native"} and steghide_path is None and _is_native_supported(input_path):
-        native_attempted = True
-        for candidate in _password_candidates(wordlist_path, include_empty=include_empty):
-            attempts += 1
-            try:
-                payload = extract_steghide_native(input_path, password=candidate)
-            except (OSError, ValueError) as error:
-                last_error = str(error)
-                continue
-            if contains is not None and contains not in payload.data:
-                continue
-            if prefix is not None and not payload.data.startswith(prefix):
-                continue
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(payload.data)
-            return SteghideResult(
-                operation="image.steghide.brute-native",
-                input_path=str(input_path),
-                output_path=str(output_path),
-                output_paths=[str(output_path)],
-                tool_path="python",
-                backend="native",
-                carrier_format=payload.carrier_format,
-                embedded_name=payload.embedded_name,
-                password_used=bool(candidate),
-                found_password=candidate,
-                attempts=attempts,
-                written_bytes=len(payload.data),
-                encrypted=payload.encrypted,
-                compressed=payload.compressed,
-                checksum_ok=payload.checksum_ok,
-            )
-        if backend == "native":
-            extra = f"；最后错误：{last_error}" if last_error else ""
-            raise ValueError(f"steghide native 字典爆破失败，尝试 {attempts} 个密码{extra}")
-    elif backend == "native":
-        raise ValueError("steghide native backend 当前内置支持 JPEG/BMP/WAV/AU 载体")
-
-    native_error = ValueError(last_error) if native_attempted and last_error else None
-    tool = _resolve_tool_or_native_error(steghide_path, native_error)
-    with tempfile.TemporaryDirectory(prefix="omm-steghide-") as directory:
-        tmp_output = Path(directory) / "candidate.bin"
-        for candidate in _password_candidates(wordlist_path, include_empty=include_empty):
-            attempts += 1
-            if tmp_output.exists():
-                tmp_output.unlink()
-            completed = _run_steghide_extract(tool, input_path, tmp_output, candidate)
-            if completed.returncode != 0:
-                last_error = _tool_error(completed)
-                continue
-            if not tmp_output.exists():
-                last_error = "steghide 没有写出文件"
-                continue
-            payload_bytes = tmp_output.read_bytes()
-            if contains is not None and contains not in payload_bytes:
-                continue
-            if prefix is not None and not payload_bytes.startswith(prefix):
-                continue
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(payload_bytes)
-            return SteghideResult(
-                operation="image.steghide.brute",
-                input_path=str(input_path),
-                output_path=str(output_path),
-                output_paths=[str(output_path)],
-                tool_path=tool,
-                backend="tool",
-                password_used=bool(candidate),
-                found_password=candidate,
-                attempts=attempts,
-                written_bytes=len(payload_bytes),
-                stdout=completed.stdout,
-                stderr=completed.stderr,
-            )
+    for candidate in _password_candidates(wordlist_path, include_empty=include_empty):
+        attempts += 1
+        try:
+            payload = extract_steghide_native(input_path, password=candidate)
+        except (OSError, ValueError) as error:
+            last_error = str(error)
+            continue
+        if contains is not None and contains not in payload.data:
+            continue
+        if prefix is not None and not payload.data.startswith(prefix):
+            continue
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(payload.data)
+        return SteghideResult(
+            operation="image.steghide.brute-native",
+            input_path=str(input_path),
+            output_path=str(output_path),
+            output_paths=[str(output_path)],
+            tool_path="python",
+            backend="native",
+            carrier_format=payload.carrier_format,
+            embedded_name=payload.embedded_name,
+            password_used=bool(candidate),
+            found_password=candidate,
+            attempts=attempts,
+            written_bytes=len(payload.data),
+            encrypted=payload.encrypted,
+            compressed=payload.compressed,
+            checksum_ok=payload.checksum_ok,
+        )
     extra = f"；最后错误：{last_error}" if last_error else ""
-    raise ValueError(f"steghide 字典爆破失败，尝试 {attempts} 个密码{extra}")
+    raise ValueError(f"steghide native 字典爆破失败，尝试 {attempts} 个密码{extra}")
 
 
 def extract_steghide_native(input_path: Path, *, password: str = "") -> _NativeSteghidePayload:
@@ -619,58 +524,6 @@ def _bytes_from_bits(bits: list[int]) -> bytes:
 
 def _bits_from_bytes(data: bytes) -> list[int]:
     return [(byte >> bit) & 1 for byte in data for bit in range(8)]
-
-
-def _run_steghide_extract(
-    tool: str,
-    input_path: Path,
-    output_path: Path,
-    password: str,
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [
-            tool,
-            "extract",
-            "-sf",
-            str(input_path),
-            "-xf",
-            str(output_path),
-            "-p",
-            password,
-            "-f",
-        ],
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=120,
-    )
-
-
-def _resolve_tool_or_native_error(configured: Path | None, native_error: Exception | None) -> str:
-    try:
-        return _resolve_tool(configured)
-    except FileNotFoundError as error:
-        if native_error is not None:
-            raise ValueError(
-                f"steghide native backend failed: {native_error}；tool fallback unavailable: {error}"
-            ) from error
-        raise
-
-
-def _resolve_tool(configured: Path | None) -> str:
-    if configured is not None:
-        if not configured.is_file():
-            raise FileNotFoundError(f"steghide 不存在：{configured}")
-        return str(configured)
-    found = shutil.which("steghide")
-    if found is None:
-        raise FileNotFoundError("找不到 steghide，请安装 steghide 或用 --steghide 指定可执行文件")
-    return found
-
-
-def _tool_error(completed: subprocess.CompletedProcess[str]) -> str:
-    details = (completed.stderr or completed.stdout).strip()
-    return f"steghide 失败，exit={completed.returncode}" + (f"：{details}" if details else "")
 
 
 def _password_candidates(wordlist_path: Path, *, include_empty: bool) -> list[str]:

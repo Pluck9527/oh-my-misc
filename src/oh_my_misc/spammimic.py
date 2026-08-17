@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import html
 import re
 import tempfile
-import urllib.parse
-import urllib.request
 import zlib
 from dataclasses import asdict, dataclass
 from hashlib import sha256
@@ -127,13 +124,8 @@ def encode_spammimic(
 ) -> SpamMimicResult:
     payload = _load_payload(payload_path=payload_path, text=text)
     mode = _validate_mode(mode)
-    backend = _validate_backend(backend)
-    if backend == "remote":
-        output = _remote_encode(payload, mode=mode, password=password, cover_path=cover_path)
-        backend_name = "remote"
-    else:
-        output = _native_encode(payload, mode=mode, password=password, cover_path=cover_path)
-        backend_name = "native"
+    _validate_backend(backend)
+    output = _native_encode(payload, mode=mode, password=password, cover_path=cover_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(output, encoding="utf-8")
     return SpamMimicResult(
@@ -141,12 +133,12 @@ def encode_spammimic(
         input_path=str(payload_path or "<text>"),
         output_path=str(output_path),
         output_paths=[str(output_path)],
-        backend=backend_name,
+        backend="native",
         mode=mode,
         payload_bytes=len(payload),
         written_bytes=output_path.stat().st_size,
         password_used=password is not None,
-        password_verified=password is not None and backend_name == "native",
+        password_verified=password is not None,
     )
 
 
@@ -162,34 +154,8 @@ def decode_spammimic(
     mode = _validate_mode(mode)
     backend = _validate_backend(backend, allow_auto=True)
     text = input_path.read_text(encoding="utf-8", errors="replace")
-    errors: list[str] = []
-    if backend in {"auto", "native"}:
-        try:
-            payload, verified = _native_decode(text, mode=mode, password=password)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(payload)
-            return SpamMimicResult(
-                operation="text.spammimic.decode",
-                input_path=str(input_path),
-                output_path=str(output_path),
-                output_paths=[str(output_path)],
-                backend="native",
-                mode=mode,
-                payload_bytes=len(payload),
-                written_bytes=len(payload),
-                password_used=password is not None,
-                password_verified=verified,
-            )
-        except ValueError as error:
-            errors.append(str(error))
-            if backend == "native":
-                raise
-    try:
-        payload = _remote_decode(text, mode=mode, password=password)
-    except ValueError as error:
-        if errors:
-            raise ValueError("; ".join([*errors, str(error)])) from error
-        raise
+    _ = backend
+    payload, verified = _native_decode(text, mode=mode, password=password)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(payload)
     return SpamMimicResult(
@@ -197,12 +163,12 @@ def decode_spammimic(
         input_path=str(input_path),
         output_path=str(output_path),
         output_paths=[str(output_path)],
-        backend="remote",
+        backend="native",
         mode=mode,
         payload_bytes=len(payload),
         written_bytes=len(payload),
         password_used=password is not None,
-        password_verified=password is not None,
+        password_verified=verified,
     )
 
 
@@ -387,69 +353,6 @@ def _decode_space_bits(text: str) -> list[int]:
     if len(bits) < (len(_NATIVE_MAGIC) + 8) * 8:
         raise ValueError("SpamMimic space 文本中可识别的本地空白数据不足")
     return bits
-
-
-def _remote_encode(
-    payload: bytes, *, mode: str, password: str | None, cover_path: Path | None
-) -> str:
-    plaintext = payload.decode("utf-8", errors="replace")
-    if mode == "space":
-        cover = cover_path.read_text(encoding="utf-8", errors="replace") if cover_path else ""
-        response = _post_form(
-            "https://www.spammimic.com/encodespace.cgi",
-            {"plaintext": plaintext, "spacetext": cover},
-        )
-    else:
-        params = {"plaintext": plaintext}
-        if password is not None:
-            params["password"] = password
-        response = _post_form("https://www.spammimic.com/encode.cgi", params)
-    return _extract_textarea(response)
-
-
-def _remote_decode(text: str, *, mode: str, password: str | None) -> bytes:
-    if mode == "space":
-        response = _post_form("https://www.spammimic.com/decodespace.cgi", {"cyphertext": text})
-    else:
-        params = {"cyphertext": text}
-        if password is not None:
-            params["password"] = password
-        response = _post_form("https://www.spammimic.com/decode.cgi", params)
-    value = _extract_plaintext_value(response)
-    return value.encode("utf-8")
-
-
-def _post_form(url: str, values: dict[str, str]) -> str:
-    data = urllib.parse.urlencode(values).encode()
-    request = urllib.request.Request(
-        url,
-        data=data,
-        headers={"User-Agent": "oh-my-misc/0.1 (+https://www.spammimic.com/)"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            return response.read().decode("utf-8", errors="replace")
-    except OSError as error:
-        raise ValueError(f"SpamMimic remote 请求失败：{error}") from error
-
-
-def _extract_textarea(response: str) -> str:
-    match = re.search(r"<textarea[^>]*>(.*?)</textarea>", response, flags=re.IGNORECASE | re.DOTALL)
-    if not match:
-        raise ValueError("SpamMimic remote 响应缺少 textarea")
-    return html.unescape(match.group(1).strip("\n"))
-
-
-def _extract_plaintext_value(response: str) -> str:
-    match = re.search(r"<input[^>]*name=plaintext[^>]*value=\"(.*?)\"", response, flags=re.IGNORECASE | re.DOTALL)
-    if match:
-        return html.unescape(match.group(1))
-    match = re.search(r"<textarea[^>]*name=plaintext[^>]*>(.*?)</textarea>", response, flags=re.IGNORECASE | re.DOTALL)
-    if match:
-        return html.unescape(match.group(1).strip("\n"))
-    if "could not" in response.lower() or "error" in response.lower():
-        raise ValueError("SpamMimic remote 解码失败")
-    raise ValueError("SpamMimic remote 响应缺少 plaintext")
 
 
 def _bytes_to_bits(data: bytes) -> list[int]:

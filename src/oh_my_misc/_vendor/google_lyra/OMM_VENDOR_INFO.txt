@@ -1,0 +1,5 @@
+Upstream: https://github.com/google/lyra
+Commit: 47698dadf0010abff6a848e02642f55f806d4842
+Version tag/log subject: 1.3.2
+License: Apache-2.0, see LICENSE in this directory.
+Local addition: omm_native/ exposes a C ABI loaded by oh_my_misc.lyra via ctypes.

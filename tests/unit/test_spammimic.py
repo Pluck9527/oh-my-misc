@@ -107,25 +107,12 @@ def test_spammimic_cli_json_roundtrip(tmp_path: Path, capsys) -> None:
     assert output.read_bytes() == b"flag{cli_spam}"
 
 
-def test_spammimic_remote_parsers(monkeypatch, tmp_path: Path) -> None:
-    import oh_my_misc.spammimic as sm
-
-    responses: list[tuple[str, dict[str, str]]] = []
-
-    def fake_post(url: str, values: dict[str, str]) -> str:
-        responses.append((url, values))
-        if "encode" in url:
-            return '<textarea name=cyphertext>Dear Remote &amp; Test</textarea>'
-        return '<input type=text name=plaintext value="flag{remote}">'
-
-    monkeypatch.setattr(sm, "_post_form", fake_post)
+def test_spammimic_remote_backend_alias_is_native(tmp_path: Path) -> None:
     stego = tmp_path / "remote.txt"
     out = tmp_path / "remote.bin"
 
     encode_spammimic(stego, text="flag{remote}", backend="remote", password="pw")
     decode_spammimic(stego, out, backend="remote", password="pw")
 
-    assert stego.read_text(encoding="utf-8") == "Dear Remote & Test"
+    assert "Senate bill" in stego.read_text(encoding="utf-8")
     assert out.read_bytes() == b"flag{remote}"
-    assert responses[0][1]["password"] == "pw"
-    assert responses[1][1]["password"] == "pw"

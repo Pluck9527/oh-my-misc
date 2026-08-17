@@ -15,6 +15,10 @@ TRAILER_SIZE = 28
 TRAILER_MAGIC = b"HI"
 BLOWFISH_KEY = b"Tonycat" + b"\x00" * 49
 BMP_LSB_DATA_OFFSET = 0xE0
+OURSECRET_EOF_SIGNATURE = bytes.fromhex(
+    "9E97BA2A008088C9A370975BA2E499B8C178720F88DDDC342B4E7D317FB5E87039A8B84275687191"
+)
+OURSECRET_EOF_SIGNATURE_SIZE = len(OURSECRET_EOF_SIGNATURE)
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,9 @@ class OurSecretResult:
     written_bytes: int
     capacity_bytes: int = 0
     carrier_bytes: int = 0
+    appended_bytes: int = 0
+    signature_offset: int | None = None
+    signature_hex: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {"status": "success", **asdict(self)}
@@ -55,10 +62,40 @@ class _HiddenBlob:
     data_size: int
     password_tag: bytes
     capacity_bytes: int = 0
+    signature_offset: int | None = None
 
 
 def inspect_oursecret(carrier_path: Path, *, mode: str = "auto") -> OurSecretResult:
-    blob = _find_hidden_blob(carrier_path, mode=mode)
+    raw = _read_file(carrier_path, "载体文件")
+    try:
+        blob = _find_hidden_blob_from_bytes(raw, mode=mode)
+    except ValueError:
+        if mode not in {"auto", "append"}:
+            raise
+        signature_entries = _scan_oursecret_signatures(raw)
+        if not signature_entries:
+            raise
+        first_signature = signature_entries[0]
+        return OurSecretResult(
+            operation="stego.oursecret.inspect",
+            input_path=str(carrier_path),
+            output_path="-",
+            output_paths=[],
+            mode="signature",
+            carrier_format="generic",
+            data_size=0,
+            encrypted_bytes=0,
+            payload_bytes=0,
+            password_tag="",
+            password_verified=None,
+            entries=signature_entries,
+            count=len(signature_entries),
+            written_bytes=0,
+            carrier_bytes=len(raw),
+            appended_bytes=len(raw) - first_signature["offset"],
+            signature_offset=first_signature["offset"],
+            signature_hex=OURSECRET_EOF_SIGNATURE.hex(),
+        )
     return OurSecretResult(
         operation="stego.oursecret.inspect",
         input_path=str(carrier_path),
@@ -75,7 +112,10 @@ def inspect_oursecret(carrier_path: Path, *, mode: str = "auto") -> OurSecretRes
         count=1,
         written_bytes=0,
         capacity_bytes=blob.capacity_bytes,
-        carrier_bytes=Path(carrier_path).stat().st_size,
+        carrier_bytes=len(raw),
+        appended_bytes=_appended_bytes_for_blob(raw, blob),
+        signature_offset=blob.signature_offset,
+        signature_hex=OURSECRET_EOF_SIGNATURE.hex() if blob.signature_offset is not None else "",
     )
 
 
@@ -87,7 +127,8 @@ def extract_oursecret(
     mode: str = "auto",
     overwrite: bool = False,
 ) -> OurSecretResult:
-    blob = _find_hidden_blob(carrier_path, mode=mode)
+    raw = _read_file(carrier_path, "载体文件")
+    blob = _find_hidden_blob_from_bytes(raw, mode=mode)
     verified = None
     if password is not None:
         verified = password_tag(password) == blob.password_tag
@@ -128,7 +169,10 @@ def extract_oursecret(
         count=len(entries),
         written_bytes=written_bytes,
         capacity_bytes=blob.capacity_bytes,
-        carrier_bytes=Path(carrier_path).stat().st_size,
+        carrier_bytes=len(raw),
+        appended_bytes=_appended_bytes_for_blob(raw, blob),
+        signature_offset=blob.signature_offset,
+        signature_hex=OURSECRET_EOF_SIGNATURE.hex() if blob.signature_offset is not None else "",
     )
 
 
@@ -141,6 +185,7 @@ def hide_oursecret(
     text_name: str = "Message",
     password: str = "",
     mode: str = "append",
+    signature: bool = True,
 ) -> OurSecretResult:
     _validate_hide_mode(mode)
     raw = _read_file(carrier_path, "载体文件")
@@ -148,8 +193,11 @@ def hide_oursecret(
     encrypted = _encrypt(payload)
     trailer = make_trailer(len(encrypted), password)
     capacity_bytes = 0
+    signature_offset = None
     if mode == "append":
-        out = raw + encrypted + trailer
+        signature_bytes = OURSECRET_EOF_SIGNATURE if signature else b""
+        signature_offset = len(raw) if signature_bytes else None
+        out = raw + signature_bytes + encrypted + trailer
         carrier_format = "generic"
     else:
         pixel_offset = _bmp_pixel_offset(raw)
@@ -183,6 +231,9 @@ def hide_oursecret(
         written_bytes=output_path.stat().st_size,
         capacity_bytes=capacity_bytes,
         carrier_bytes=len(raw),
+        appended_bytes=len(out) - len(raw) if mode == "append" else 0,
+        signature_offset=signature_offset,
+        signature_hex=OURSECRET_EOF_SIGNATURE.hex() if signature_offset is not None else "",
     )
 
 
@@ -235,6 +286,11 @@ def lsb_extract(pixels: bytes, offset: int, size: int) -> bytes:
 def _find_hidden_blob(carrier_path: Path, *, mode: str) -> _HiddenBlob:
     _validate_mode(mode)
     raw = _read_file(carrier_path, "载体文件")
+    return _find_hidden_blob_from_bytes(raw, mode=mode)
+
+
+def _find_hidden_blob_from_bytes(raw: bytes, *, mode: str) -> _HiddenBlob:
+    _validate_mode(mode)
     errors: list[str] = []
     if mode in {"auto", "append"}:
         try:
@@ -264,12 +320,14 @@ def _find_append_blob(raw: bytes) -> _HiddenBlob:
     if start < 0:
         raise ValueError("append 模式数据长度越界")
     encrypted = raw[start : len(raw) - TRAILER_SIZE]
+    signature_offset = _signature_before(raw, start)
     return _HiddenBlob(
         mode="append",
         carrier_format="generic",
         encrypted=encrypted,
         data_size=data_size,
         password_tag=tag,
+        signature_offset=signature_offset,
     )
 
 
@@ -398,3 +456,39 @@ def _read_file(path: Path, label: str) -> bytes:
     if not Path(path).is_file():
         raise FileNotFoundError(f"{label}不存在：{path}")
     return Path(path).read_bytes()
+
+
+def _signature_before(raw: bytes, encrypted_start: int) -> int | None:
+    signature_start = encrypted_start - OURSECRET_EOF_SIGNATURE_SIZE
+    if signature_start >= 0 and raw[signature_start:encrypted_start] == OURSECRET_EOF_SIGNATURE:
+        return signature_start
+    return None
+
+
+def _scan_oursecret_signatures(raw: bytes) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    start = 0
+    while True:
+        offset = raw.find(OURSECRET_EOF_SIGNATURE, start)
+        if offset < 0:
+            break
+        entries.append(
+            {
+                "kind": "oursecret-eof-signature",
+                "offset": offset,
+                "size": OURSECRET_EOF_SIGNATURE_SIZE,
+                "appended_bytes": len(raw) - offset,
+                "signature": OURSECRET_EOF_SIGNATURE.hex(),
+            }
+        )
+        start = offset + 1
+    return entries
+
+
+def _appended_bytes_for_blob(raw: bytes, blob: _HiddenBlob) -> int:
+    if blob.mode != "append":
+        return 0
+    start = len(raw) - TRAILER_SIZE - len(blob.encrypted)
+    if blob.signature_offset is not None:
+        start = blob.signature_offset
+    return max(0, len(raw) - start)

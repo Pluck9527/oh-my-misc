@@ -4,11 +4,13 @@ import bz2
 import gzip
 import lzma
 import shutil
-import subprocess
 import tarfile
 import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
+
+import py7zr
+from py7zr import exceptions as py7zr_exceptions
 
 ARCHIVE_SUFFIXES = (
     ".zip",
@@ -230,8 +232,10 @@ def _extract_archive(
         return [_extract_single_stream(archive, destination, opener=bz2.open)]
     if archive_type == "xz":
         return [_extract_single_stream(archive, destination, opener=lzma.open)]
-    if archive_type in {"7z", "rar"}:
-        return _extract_with_7z(archive, destination, password=password, sevenzip=sevenzip)
+    if archive_type == "7z":
+        return _extract_7z_native(archive, destination, password=password, sevenzip=sevenzip)
+    if archive_type == "rar":
+        raise ValueError("RAR 原生解包未实现")
     raise ValueError(f"不支持的压缩类型：{archive_type}")
 
 
@@ -288,41 +292,34 @@ def _extract_single_stream(archive: Path, destination: Path, *, opener: object) 
     return output_path
 
 
-def _extract_with_7z(
+def _extract_7z_native(
     archive: Path,
     destination: Path,
     *,
     password: str | None,
     sevenzip: Path | None,
 ) -> list[Path]:
-    tool = _resolve_7z(sevenzip)
+    _ = sevenzip
     before = {path.resolve() for path in destination.rglob("*") if path.is_file()}
-    args = [tool, "x", "-y", f"-o{destination}"]
-    if password is not None:
-        args.append(f"-p{password}")
-    args.append(str(archive))
-    completed = subprocess.run(args, text=True, capture_output=True, check=False)
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()
-        raise ValueError(
-            f"7z/rar 解压失败，退出码 {completed.returncode}" + (f"：{detail}" if detail else "")
-        )
+    try:
+        with py7zr.SevenZipFile(archive, mode="r", password=password) as archive_file:
+            for name in archive_file.getnames():
+                _safe_join(destination, name.replace("\\", "/"))
+            archive_file.extractall(path=destination)
+    except py7zr_exceptions.PasswordRequired as error:
+        raise ValueError("7z 解压失败，需要密码") from error
+    except (
+        py7zr_exceptions.ArchiveError,
+        py7zr_exceptions.DecompressionError,
+        py7zr_exceptions.UnsupportedCompressionMethodError,
+        lzma.LZMAError,
+        OSError,
+    ) as error:
+        raise ValueError(f"7z 原生解压失败：{error}") from error
     after = [path for path in destination.rglob("*") if path.is_file()]
     for path in after:
         _safe_join(destination, str(path.relative_to(destination)))
     return [path for path in after if path.resolve() not in before]
-
-
-def _resolve_7z(sevenzip: Path | None) -> str:
-    if sevenzip is not None:
-        if not sevenzip.is_file():
-            raise FileNotFoundError(f"7z 可执行文件不存在：{sevenzip}")
-        return str(sevenzip)
-    for name in ("7z", "7zz", "7za"):
-        found = shutil.which(name)
-        if found is not None:
-            return found
-    raise FileNotFoundError("找不到 7z/7zz/7za；解 7z/rar 套娃请安装 7-Zip 或用 --sevenzip 指定")
 
 
 def _safe_join(root: Path, name: str) -> Path:

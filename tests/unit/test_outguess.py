@@ -4,7 +4,6 @@ import contextlib
 import io
 import json
 import tempfile
-import textwrap
 import unittest
 from pathlib import Path
 
@@ -18,56 +17,75 @@ class OutguessTest(unittest.TestCase):
     def test_extract_uses_key_and_writes_payload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            tool = _fake_outguess(root)
-            image = root / "outguess.jpg"
+            cover = root / "cover.ppm"
+            stego = root / "outguess.ppm"
+            payload = root / "payload.txt"
             output = root / "flag.txt"
-            image.write_text("abc", encoding="utf-8")
+            _write_ppm(cover, 180, 180)
+            payload.write_text("flag{abc}", encoding="utf-8")
+            hide_outguess(cover, stego, payload, key="abc", backend="native")
 
-            result = extract_outguess(image, output, key="abc", outguess_path=tool)
+            result = extract_outguess(
+                stego, output, key="abc", outguess_path=root / "ignored-outguess", backend="tool"
+            )
 
-            self.assertEqual(result.operation, "image.outguess.extract")
+            self.assertEqual(result.operation, "image.outguess.extract-native")
+            self.assertEqual(result.tool_path, "python")
             self.assertEqual(result.found_key, "abc")
             self.assertEqual(output.read_text(encoding="utf-8"), "flag{abc}")
 
     def test_brute_wordlist_finds_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            tool = _fake_outguess(root)
-            image = root / "outguess.jpg"
+            cover = root / "cover.ppm"
+            stego = root / "outguess.ppm"
+            payload = root / "payload.txt"
             words = root / "words.txt"
             output = root / "flag.txt"
-            image.write_text("secret", encoding="utf-8")
+            _write_ppm(cover, 180, 180)
+            payload.write_text("flag{secret}", encoding="utf-8")
+            hide_outguess(cover, stego, payload, key="secret", backend="native")
             words.write_text("bad\nsecret\n", encoding="utf-8")
 
             result = brute_outguess(
-                image,
+                stego,
                 words,
                 output,
-                outguess_path=tool,
+                outguess_path=root / "ignored-outguess",
+                backend="tool",
                 contains=b"flag{",
                 include_empty=False,
             )
 
-            self.assertEqual(result.operation, "image.outguess.brute")
+            self.assertEqual(result.operation, "image.outguess.brute-native")
+            self.assertEqual(result.tool_path, "python")
             self.assertEqual(result.found_key, "secret")
             self.assertEqual(result.attempts, 2)
             self.assertEqual(output.read_text(encoding="utf-8"), "flag{secret}")
 
-    def test_hide_invokes_outguess_d_payload(self) -> None:
+    def test_hide_tool_alias_uses_native_payload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            tool = _fake_outguess(root)
-            image = root / "cover.jpg"
+            image = root / "cover.ppm"
             payload = root / "payload.txt"
-            stego = root / "stego.jpg"
-            image.write_text("cover", encoding="utf-8")
+            stego = root / "stego.ppm"
+            output = root / "out.txt"
+            _write_ppm(image, 180, 180)
             payload.write_text("flag{embed}", encoding="utf-8")
 
-            result = hide_outguess(image, stego, payload, key="abc", outguess_path=tool)
+            result = hide_outguess(
+                image,
+                stego,
+                payload,
+                key="abc",
+                outguess_path=root / "ignored-outguess",
+                backend="tool",
+            )
+            extract_outguess(stego, output, key="abc")
 
-            self.assertEqual(result.operation, "image.outguess.hide")
-            self.assertIn("key=abc", stego.read_text(encoding="utf-8"))
-            self.assertIn("flag{embed}", stego.read_text(encoding="utf-8"))
+            self.assertEqual(result.operation, "image.outguess.hide-native")
+            self.assertEqual(result.tool_path, "python")
+            self.assertEqual(output.read_text(encoding="utf-8"), "flag{embed}")
 
     def test_native_jpeg_roundtrip_without_outguess_binary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -135,11 +153,14 @@ class OutguessTest(unittest.TestCase):
     def test_cli_extract_wordlist_json(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            tool = _fake_outguess(root)
-            image = root / "outguess.jpg"
+            cover = root / "cover.ppm"
+            image = root / "outguess.ppm"
+            secret_payload = root / "payload.txt"
             words = root / "words.txt"
             output = root / "flag.txt"
-            image.write_text("hunter2", encoding="utf-8")
+            _write_ppm(cover, 180, 180)
+            secret_payload.write_text("flag{hunter2}", encoding="utf-8")
+            hide_outguess(cover, image, secret_payload, key="hunter2", backend="native")
             words.write_text("wrong\nhunter2\n", encoding="utf-8")
 
             stdout = io.StringIO()
@@ -153,8 +174,8 @@ class OutguessTest(unittest.TestCase):
                         "--wordlist",
                         str(words),
                         "--no-empty",
-                        "--outguess",
-                        str(tool),
+                        "--backend",
+                        "tool",
                         "--contains",
                         "flag{",
                         "--output",
@@ -165,7 +186,8 @@ class OutguessTest(unittest.TestCase):
             payload = json.loads(stdout.getvalue())
 
             self.assertEqual(exit_code, 0)
-            self.assertEqual(payload["operation"], "image.outguess.brute")
+            self.assertEqual(payload["operation"], "image.outguess.brute-native")
+            self.assertEqual(payload["tool_path"], "python")
             self.assertEqual(payload["found_key"], "hunter2")
             self.assertEqual(payload["attempts"], 2)
             self.assertEqual(output.read_text(encoding="utf-8"), "flag{hunter2}")
@@ -187,53 +209,6 @@ def _write_ppm(path: Path, width: int, height: int) -> None:
         for x in range(width):
             pixels.extend(((x * 3 + y) % 256, (x + y * 5) % 256, (x * 7 + y * 11) % 256))
     path.write_bytes(f"P6\n{width} {height}\n255\n".encode("ascii") + bytes(pixels))
-
-
-def _fake_outguess(root: Path) -> Path:
-    path = root / "outguess"
-    path.write_text(
-        textwrap.dedent(
-            r'''
-            #!/usr/bin/env python3
-            from pathlib import Path
-            import sys
-
-            args = sys.argv[1:]
-            def value(flag):
-                index = args.index(flag)
-                return args[index + 1]
-            key = value("-k") if "-k" in args else ""
-            if "-r" in args:
-                index = args.index("-r")
-                image = Path(args[index + 1])
-                output = Path(args[index + 2])
-                expected = image.read_text(encoding="utf-8")
-                if key != expected:
-                    print("extract failed", file=sys.stderr)
-                    raise SystemExit(1)
-                output.parent.mkdir(parents=True, exist_ok=True)
-                output.write_text(f"flag{{{key or 'empty_outguess'}}}", encoding="utf-8")
-                raise SystemExit(0)
-            if "-d" in args:
-                payload = Path(value("-d"))
-                input_path = Path(args[-2])
-                output = Path(args[-1])
-                output.parent.mkdir(parents=True, exist_ok=True)
-                output.write_text(
-                    f"stego key={key} cover={input_path.read_text(encoding='utf-8')} payload={payload.read_text(encoding='utf-8')}",
-                    encoding="utf-8",
-                )
-                raise SystemExit(0)
-            print("unsupported", file=sys.stderr)
-            raise SystemExit(2)
-            '''
-        ).strip()
-        + "\n",
-        encoding="utf-8",
-    )
-    path.chmod(0o755)
-    return path
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import gzip
-import os
-import shutil
 import struct
-import subprocess
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from hashlib import sha1
@@ -108,6 +105,13 @@ class _HiddenPacket:
     selected_bits: int
     embedded_bytes: int
     length_size: int
+
+
+@dataclass(frozen=True)
+class _ParsedMP3Frame:
+    frame: MP3StegoFrame
+    header: _Header
+    length_lsb_bit_offsets: list[int]
 
 
 def inspect_mp3stego(
@@ -287,58 +291,88 @@ def encode_mp3stego(
     payload_path: Path,
     password: str = "",
     encoder: Path | None = None,
+    length_size: int | Literal["auto"] = 4,
 ) -> MP3StegoResult:
-    executable = _resolve_mp3stego_tool("encoder", encoder)
-    command = [
-        str(executable),
-        "-E",
-        str(payload_path),
-        "-P",
-        password,
-        str(input_path),
-        str(output_path),
-    ]
-    completed = subprocess.run(command, check=False, capture_output=True, text=True)
-    if completed.returncode != 0:
-        detail = (
-            completed.stderr.strip() or completed.stdout.strip() or f"exit {completed.returncode}"
+    """Embed MP3Stego-compatible bits by patching Layer III side-info parity.
+
+    For an MP3 input, the function keeps the carrier bytes and flips only the
+    least significant bit of selected ``part2_3_length`` fields.  For the legacy
+    CLI shape that passes a WAV input, a deterministic MPEG Layer III frame
+    carrier is generated locally so tests and CTF fixtures no longer need
+    MP3Stego's external ``Encode.exe``.
+    """
+
+    _check_file(input_path, "MP3/WAV 载体")
+    _check_file(payload_path, "载荷文件")
+    _ = encoder  # Accepted for backward CLI compatibility; native mode never calls it.
+    length_size = _normalise_length_size(length_size)
+    payload = Path(payload_path).read_bytes()
+    raw_payload = _compress_encrypt_mp3stego_payload(payload, password=password)
+    if len(raw_payload) >= 1 << (length_size * 8):
+        raise ValueError("MP3Stego 嵌入密文长度超过长度头可表达范围")
+
+    carrier = bytearray(Path(input_path).read_bytes())
+    try:
+        parsed_frames = _parse_mp3_frames_from_bytes(bytes(carrier))
+        generated_carrier = False
+        hidden_source = _StegoOpenEmbeddedText(raw_payload, password=password, length_size=length_size)
+        selected_bits = _embed_packet_bits_in_frames(carrier, parsed_frames, hidden_source)
+    except ValueError:
+        if not _looks_like_wav_container(carrier):
+            raise
+        carrier_bytes, selected_bits = _build_synthetic_mp3stego_carrier(
+            raw_payload,
+            password=password,
+            length_size=length_size,
         )
-        raise ValueError(f"MP3Stego encoder failed: {detail}")
+        carrier = bytearray(carrier_bytes)
+        parsed_frames = _parse_mp3_frames_from_bytes(bytes(carrier))
+        generated_carrier = True
+
     output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(carrier)
+    frames = parse_mp3_frames(output_path)
     if not output_path.exists():
-        raise ValueError("MP3Stego encoder finished without producing the requested MP3")
+        raise ValueError("MP3Stego native encoder finished without producing the requested MP3")
+    candidate_bits = sum(len(frame.hidden_bits) for frame in frames)
     return MP3StegoResult(
-        operation="audio.mp3stego.encode-tool",
+        operation="audio.mp3stego.encode-native",
         input_path=str(input_path),
         output_path=str(output_path),
         output_paths=[str(output_path)],
-        mode="encode-tool",
+        mode="encode-native-synthetic" if generated_carrier else "encode-native",
         password_used=bool(password),
         found_password=password if password else "",
-        length_size=4,
-        frames=0,
-        candidate_bits=0,
-        selected_bits=0,
-        embedded_bytes=Path(payload_path).stat().st_size,
-        payload_bytes=Path(payload_path).stat().st_size,
-        raw_bytes=0,
+        length_size=length_size,
+        frames=len(frames),
+        candidate_bits=candidate_bits,
+        selected_bits=selected_bits,
+        embedded_bytes=len(raw_payload),
+        payload_bytes=len(payload),
+        raw_bytes=len(raw_payload),
         decoded=False,
         decrypted=False,
         uncompressed=False,
         attempts=1,
-        executable=str(executable),
-        command=command,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
-        returncode=completed.returncode,
+        executable="python",
+        command=["native-mp3stego-side-info-parity"],
+        stdout="",
+        stderr="",
+        returncode=0,
         written_bytes=output_path.stat().st_size,
-        frame_entries=[],
+        frame_entries=[frame.to_dict() for frame in frames[:10]],
     )
 
 
 def parse_mp3_frames(input_path: Path) -> list[MP3StegoFrame]:
     data = Path(input_path).read_bytes()
+    return [item.frame for item in _parse_mp3_frames_from_bytes(data)]
+
+
+def _parse_mp3_frames_from_bytes(data: bytes) -> list[_ParsedMP3Frame]:
     frames: list[MP3StegoFrame] = []
+    parsed: list[_ParsedMP3Frame] = []
     pos = _skip_id3v2(data)
     while pos + 4 <= len(data):
         header = _parse_header(data, pos)
@@ -353,31 +387,38 @@ def parse_mp3_frames(input_path: Path) -> list[MP3StegoFrame]:
             continue
         side_info = data[header.side_info_offset : header.side_info_offset + header.side_info_bytes]
         try:
-            lengths = _parse_side_info_lengths(side_info, header)
+            fields = _parse_side_info_length_fields(side_info, header)
         except ValueError:
             pos += 1
             continue
+        lengths = [field[0] for field in fields]
         bits = [value & 1 for value in lengths]
-        frames.append(
-            MP3StegoFrame(
-                index=len(frames),
-                offset=header.offset,
-                version=header.version,
-                bitrate_kbps=header.bitrate_kbps,
-                sample_rate=header.sample_rate,
-                channels=header.channels,
-                channel_mode=header.channel_mode,
-                frame_length=header.frame_length,
-                side_info_offset=header.side_info_offset,
-                side_info_bytes=header.side_info_bytes,
-                part2_3_lengths=lengths,
-                hidden_bits=bits,
+        frame = MP3StegoFrame(
+            index=len(frames),
+            offset=header.offset,
+            version=header.version,
+            bitrate_kbps=header.bitrate_kbps,
+            sample_rate=header.sample_rate,
+            channels=header.channels,
+            channel_mode=header.channel_mode,
+            frame_length=header.frame_length,
+            side_info_offset=header.side_info_offset,
+            side_info_bytes=header.side_info_bytes,
+            part2_3_lengths=lengths,
+            hidden_bits=bits,
+        )
+        frames.append(frame)
+        parsed.append(
+            _ParsedMP3Frame(
+                frame=frame,
+                header=header,
+                length_lsb_bit_offsets=[field[1] for field in fields],
             )
         )
         pos = header.offset + header.frame_length
     if not frames:
         raise ValueError("no MPEG Layer III frames found")
-    return frames
+    return parsed
 
 
 def decode_mp3stego_payload(raw: bytes, *, password: str = "") -> bytes:
@@ -434,32 +475,15 @@ def _extract_packet_with_length_size(
     length_size: int,
     max_payload_bytes: int,
 ) -> _HiddenPacket:
-    selected: list[int] = []
-    prng = _MP3StegoPRNG(password)
-    embedded_bytes: int | None = None
-    required_bits: int | None = None
+    sink = _StegoCreateEmbeddedText(
+        password=password,
+        length_size=length_size,
+        max_payload_bytes=max_payload_bytes,
+    )
     for bit in bits:
-        if prng.next() != EMBED:
-            continue
-        selected.append(bit)
-        if embedded_bytes is None and len(selected) >= length_size * 8:
-            header = _bits_to_bytes(selected[: length_size * 8])
-            embedded_bytes = int.from_bytes(header, "little")
-            if embedded_bytes <= 0:
-                raise ValueError("MP3Stego embedded length is zero")
-            if embedded_bytes > max_payload_bytes:
-                raise ValueError(
-                    f"MP3Stego embedded length {embedded_bytes} exceeds --max-payload-bytes"
-                )
-            required_bits = length_size * 8 + embedded_bytes * 8
-        if required_bits is not None and len(selected) >= required_bits:
-            raw_bits = selected[length_size * 8 : required_bits]
-            return _HiddenPacket(
-                raw=_bits_to_bytes(raw_bits),
-                selected_bits=required_bits,
-                embedded_bytes=embedded_bytes or 0,
-                length_size=length_size,
-            )
+        sink.save_hidden_bit(bit)
+        if sink.finished:
+            return sink.flush()
     raise ValueError("not enough selected bits")
 
 
@@ -619,8 +643,12 @@ def _parse_header(data: bytes, offset: int) -> _Header | None:
 
 
 def _parse_side_info_lengths(side_info: bytes, header: _Header) -> list[int]:
+    return [value for value, _offset in _parse_side_info_length_fields(side_info, header)]
+
+
+def _parse_side_info_length_fields(side_info: bytes, header: _Header) -> list[tuple[int, int]]:
     reader = _BitReader(side_info)
-    lengths: list[int] = []
+    fields: list[tuple[int, int]] = []
     if header.version_id == 3:
         reader.read(9)
         reader.read(5 if header.channels == 1 else 3)
@@ -635,7 +663,8 @@ def _parse_side_info_lengths(side_info: bytes, header: _Header) -> list[int]:
         has_preflag = False
     for _gr in range(header.granules):
         for _ch in range(header.channels):
-            lengths.append(reader.read(12))
+            start = reader.bit_pos
+            fields.append((reader.read(12), start + 11))
             reader.read(9)  # big_values
             reader.read(8)  # global_gain
             reader.read(scalefac_compress_bits)
@@ -653,13 +682,211 @@ def _parse_side_info_lengths(side_info: bytes, header: _Header) -> list[int]:
                 reader.read(1)
             reader.read(1)  # scalefac_scale
             reader.read(1)  # count1table_select
-    return lengths
+    return fields
+
+
+def _compress_encrypt_mp3stego_payload(payload: bytes, *, password: str) -> bytes:
+    """Python equivalent of StegoLib CompressEncryptFile(..., bCompEnc=1)."""
+
+    return _encrypt_mp3stego_bytes(gzip.compress(payload, mtime=0), password=password)
+
+
+def _bytes_to_lsb_bits(data: bytes) -> list[int]:
+    return [(byte >> bit) & 1 for byte in data for bit in range(8)]
+
+
+class _StegoOpenEmbeddedText:
+    """Stateful Python port of StegoOpenEmbeddedText + StegoGetNextBit.
+
+    The C implementation first hides sizeof(size_t) bytes containing the length
+    of the compressed/encrypted payload, then streams the payload bytes LSB
+    first.  Each carrier opportunity is gated by GetPseudoRandomBit(NEXT), and
+    once all data bits are consumed StegoGetNextBit returns DO_NOTHING without
+    advancing the PRNG.
+    """
+
+    def __init__(self, hidden_data: bytes, *, password: str, length_size: int) -> None:
+        self._bits = _bytes_to_lsb_bits(len(hidden_data).to_bytes(length_size, "little"))
+        self._bits.extend(_bytes_to_lsb_bits(hidden_data))
+        self._prng = _MP3StegoPRNG(password)
+        self._bit_index = 0
+
+    @property
+    def finished(self) -> bool:
+        return self._bit_index >= len(self._bits)
+
+    @property
+    def embedded_bits(self) -> int:
+        return self._bit_index
+
+    @property
+    def total_bits(self) -> int:
+        return len(self._bits)
+
+    def get_next_bit(self) -> int:
+        if self.finished:
+            return DO_NOTHING
+        if self._prng.next() != EMBED:
+            return DO_NOTHING
+        bit = self._bits[self._bit_index]
+        self._bit_index += 1
+        return bit
+
+
+class _StegoCreateEmbeddedText:
+    """Stateful Python port of StegoCreateEmbeddedText + SaveHiddenBit."""
+
+    def __init__(self, *, password: str, length_size: int, max_payload_bytes: int) -> None:
+        self._prng = _MP3StegoPRNG(password)
+        self._length_size = length_size
+        self._max_payload_bytes = max_payload_bytes
+        self._header_bits: list[int] = []
+        self._body_bits: list[int] = []
+        self._embedded_bytes: int | None = None
+        self._finished = False
+
+    @property
+    def finished(self) -> bool:
+        return self._finished
+
+    def save_hidden_bit(self, bit: int) -> None:
+        if self._finished:
+            return
+        if self._prng.next() != EMBED:
+            return
+        if self._embedded_bytes is None:
+            self._header_bits.append(bit & 1)
+            if len(self._header_bits) == self._length_size * 8:
+                header = _bits_to_bytes(self._header_bits)
+                self._embedded_bytes = int.from_bytes(header, "little")
+                if self._embedded_bytes <= 0:
+                    raise ValueError("MP3Stego embedded length is zero")
+                if self._embedded_bytes > self._max_payload_bytes:
+                    raise ValueError(
+                        f"MP3Stego embedded length {self._embedded_bytes} "
+                        "exceeds --max-payload-bytes"
+                    )
+            return
+        self._body_bits.append(bit & 1)
+        if len(self._body_bits) == self._embedded_bytes * 8:
+            self._finished = True
+
+    def flush(self) -> _HiddenPacket:
+        if not self._finished or self._embedded_bytes is None:
+            raise ValueError("not enough selected bits")
+        return _HiddenPacket(
+            raw=_bits_to_bytes(self._body_bits),
+            selected_bits=self._length_size * 8 + self._embedded_bytes * 8,
+            embedded_bytes=self._embedded_bytes,
+            length_size=self._length_size,
+        )
+
+
+def _embed_packet_bits_in_frames(
+    carrier: bytearray,
+    frames: list[_ParsedMP3Frame],
+    hidden_source: _StegoOpenEmbeddedText,
+) -> int:
+    for parsed in frames:
+        base_bit_offset = parsed.header.side_info_offset * 8
+        for bit_offset in parsed.length_lsb_bit_offsets:
+            hidden_bit = hidden_source.get_next_bit()
+            if hidden_bit == DO_NOTHING:
+                continue
+            _set_stream_bit(carrier, base_bit_offset + bit_offset, hidden_bit)
+            if hidden_source.finished:
+                return hidden_source.embedded_bits
+    if not hidden_source.finished:
+        raise ValueError(
+            "MP3 carrier capacity too small for MP3Stego payload: "
+            f"selected {hidden_source.embedded_bits}/{hidden_source.total_bits} bits"
+        )
+    return hidden_source.embedded_bits
+
+
+def _set_stream_bit(data: bytearray, bit_offset: int, bit: int) -> None:
+    byte_index = bit_offset // 8
+    shift = 7 - (bit_offset % 8)
+    mask = 1 << shift
+    if bit:
+        data[byte_index] |= mask
+    else:
+        data[byte_index] &= ~mask
+
+
+def _looks_like_wav_container(data: bytes | bytearray) -> bool:
+    return len(data) >= 12 and bytes(data[:4]) == b"RIFF" and bytes(data[8:12]) == b"WAVE"
+
+
+def _build_synthetic_mp3stego_carrier(
+    hidden_data: bytes,
+    *,
+    password: str,
+    length_size: int,
+) -> tuple[bytes, int]:
+    hidden_source = _StegoOpenEmbeddedText(hidden_data, password=password, length_size=length_size)
+    frames: list[bytes] = []
+    while not hidden_source.finished:
+        hidden_bits: list[int] = []
+        for _ in range(2):
+            hidden_bit = hidden_source.get_next_bit()
+            hidden_bits.append(0 if hidden_bit == DO_NOTHING else hidden_bit)
+        frames.append(_synthetic_mpeg1_mono_frame(hidden_bits))
+    return b"".join(frames), hidden_source.embedded_bits
+
+
+def _synthetic_mpeg1_mono_frame(hidden_bits: list[int]) -> bytes:
+    header = bytes([0xFF, 0xFB, 0xB0, 0xC0])  # MPEG1 Layer III, 192 kbps, 44100 Hz, mono
+    side_info = _synthetic_mpeg1_mono_side_info([1 if bit else 0 for bit in hidden_bits])
+    frame_length = 626
+    return header + side_info + bytes(frame_length - 4 - len(side_info))
+
+
+def _synthetic_mpeg1_mono_side_info(part2_3_lengths: list[int]) -> bytes:
+    if len(part2_3_lengths) != 2:
+        raise ValueError("synthetic MP3Stego frame expects two MPEG1 mono granule bits")
+    bits: list[int] = []
+    bits.extend(_msb_bits(0, 9))  # main_data_begin
+    bits.extend(_msb_bits(0, 5))  # private_bits, mono MPEG1
+    bits.extend(_msb_bits(0, 4))  # scfsi
+    for value in part2_3_lengths:
+        bits.extend(_msb_bits(value, 12))
+        bits.extend(_msb_bits(0, 9))  # big_values
+        bits.extend(_msb_bits(210, 8))  # global_gain
+        bits.extend(_msb_bits(0, 4))  # scalefac_compress
+        bits.extend(_msb_bits(0, 1))  # window_switching_flag
+        bits.extend(_msb_bits(0, 15))  # table_select
+        bits.extend(_msb_bits(0, 4))  # region0_count
+        bits.extend(_msb_bits(0, 3))  # region1_count
+        bits.extend(_msb_bits(0, 1))  # preflag
+        bits.extend(_msb_bits(0, 1))  # scalefac_scale
+        bits.extend(_msb_bits(0, 1))  # count1table_select
+    return _pack_msb_bits(bits)[:17]
+
+
+def _msb_bits(value: int, count: int) -> list[int]:
+    return [(value >> (count - 1 - bit)) & 1 for bit in range(count)]
+
+
+def _pack_msb_bits(bits: list[int]) -> bytes:
+    padded = bits + [0] * ((8 - len(bits) % 8) % 8)
+    out = bytearray()
+    for index in range(0, len(padded), 8):
+        value = 0
+        for bit in padded[index : index + 8]:
+            value = (value << 1) | bit
+        out.append(value)
+    return bytes(out)
 
 
 class _BitReader:
     def __init__(self, data: bytes) -> None:
         self._data = data
         self._bit_pos = 0
+
+    @property
+    def bit_pos(self) -> int:
+        return self._bit_pos
 
     def read(self, count: int) -> int:
         if self._bit_pos + count > len(self._data) * 8:
@@ -685,32 +912,6 @@ def _iter_passwords(wordlist: Path, *, include_default: bool, encoding: str) -> 
             yield password
 
 
-def _resolve_mp3stego_tool(kind: str, explicit: Path | None) -> Path:
-    if explicit is not None:
-        return _check_executable(Path(explicit))
-    env_name = "MP3STEGO_ENCODER" if kind == "encoder" else "MP3STEGO_DECODER"
-    env_value = os.environ.get(env_name)
-    if env_value:
-        return _check_executable(Path(env_value))
-    names = (
-        ("Encode.exe", "encode", "mp3stego-encode")
-        if kind == "encoder"
-        else (
-            "Decode.exe",
-            "decode",
-            "mp3stego-decode",
-        )
-    )
-    for name in names:
-        found = shutil.which(name)
-        if found:
-            return _check_executable(Path(found))
-    raise ValueError(f"MP3Stego {kind} executable not found; pass --{kind} /path/to/{names[0]}")
-
-
-def _check_executable(path: Path) -> Path:
-    if not path.exists():
-        raise FileNotFoundError(path)
-    if not os.access(path, os.X_OK):
-        raise PermissionError(f"executable bit is not set: {path}")
-    return path
+def _check_file(path: Path, label: str) -> None:
+    if not Path(path).is_file():
+        raise FileNotFoundError(f"{label}不存在：{path}")

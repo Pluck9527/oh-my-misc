@@ -1,12 +1,17 @@
 from __future__ import annotations
 
-import shutil
-import subprocess
-import tempfile
+import hashlib
+import hmac
+import zlib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 TAB_WIDTH = 8
+SNOW_PROTECTED_MAGIC = b"OMMSNOW\x01"
+SNOW_FLAG_COMPRESSED = 0x01
+SNOW_FLAG_ENCRYPTED = 0x02
+SNOW_SALT_BYTES = 16
+SNOW_MAC_BYTES = 16
 
 
 @dataclass(frozen=True)
@@ -45,66 +50,34 @@ def hide_snow(
     backend: str = "auto",
     snow_path: Path | None = None,
 ) -> SnowResult:
-    """Conceal a message with SNOW trailing whitespace steganography."""
+    """Conceal a message with the native SNOW trailing whitespace backend."""
 
     _check_file(input_path, "载体文本")
     payload = _load_payload(payload_path=payload_path, text=text)
     _validate_backend(backend)
     _validate_line_length(line_length)
-    if backend in {"auto", "native"} and not password and not compress:
-        stego, capacity_low, capacity_high, extra_lines = conceal_snow_native(
-            input_path.read_bytes(), payload, line_length=line_length
-        )
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(stego)
-        return SnowResult(
-            operation="text.snow.hide-native",
-            input_path=str(input_path),
-            output_path=str(output_path),
-            output_paths=[str(output_path)],
-            tool_path="python",
-            backend="native",
-            line_length=line_length,
-            payload_bytes=len(payload),
-            written_bytes=len(stego),
-            capacity_bits_low=capacity_low,
-            capacity_bits_high=capacity_high,
-            extra_lines=extra_lines,
-        )
-    if backend == "native":
-        raise ValueError(
-            "SNOW 原生后端当前支持无密码、无 -C 的 trailing whitespace 编码；--password/--compress 请用 --backend tool"
-        )
-    tool = _resolve_tool(snow_path)
-    with tempfile.TemporaryDirectory(prefix="omm-snow-") as directory:
-        payload_file = Path(directory) / "payload.bin"
-        payload_file.write_bytes(payload)
-        args = [tool, "-Q"]
-        if compress:
-            args.append("-C")
-        if password is not None:
-            args.extend(["-p", password])
-        args.extend(
-            ["-l", str(line_length), "-f", str(payload_file), str(input_path), str(output_path)]
-        )
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        completed = _run_tool(args)
-    if completed.returncode != 0:
-        raise ValueError(_tool_error(completed))
+    _ = snow_path
+    packed = _pack_snow_payload(payload, password=password, compress=compress)
+    stego, capacity_low, capacity_high, extra_lines = conceal_snow_native(
+        input_path.read_bytes(), packed, line_length=line_length
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(stego)
     return SnowResult(
-        operation="text.snow.hide",
+        operation="text.snow.hide-native",
         input_path=str(input_path),
         output_path=str(output_path),
         output_paths=[str(output_path)],
-        tool_path=tool,
-        backend="tool",
+        tool_path="python",
+        backend="native",
         line_length=line_length,
         password_used=password is not None,
         compressed=compress,
         payload_bytes=len(payload),
-        written_bytes=output_path.stat().st_size if output_path.exists() else 0,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
+        written_bytes=len(stego),
+        capacity_bits_low=capacity_low,
+        capacity_bits_high=capacity_high,
+        extra_lines=extra_lines,
     )
 
 
@@ -117,54 +90,27 @@ def extract_snow(
     backend: str = "auto",
     snow_path: Path | None = None,
 ) -> SnowResult:
-    """Extract a message from SNOW trailing whitespace steganography."""
+    """Extract a message with the native SNOW trailing whitespace backend."""
 
     _check_file(input_path, "SNOW 文本")
     _validate_backend(backend)
-    if backend in {"auto", "native"} and not password and not compress:
-        payload = extract_snow_native(input_path.read_bytes())
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(payload)
-        return SnowResult(
-            operation="text.snow.extract-native",
-            input_path=str(input_path),
-            output_path=str(output_path),
-            output_paths=[str(output_path)],
-            tool_path="python",
-            backend="native",
-            line_length=0,
-            payload_bytes=len(payload),
-            written_bytes=len(payload),
-        )
-    if backend == "native":
-        raise ValueError(
-            "SNOW 原生后端当前支持无密码、无 -C 提取；--password/--compress 请用 --backend tool"
-        )
-    tool = _resolve_tool(snow_path)
-    args = [tool, "-Q"]
-    if compress:
-        args.append("-C")
-    if password is not None:
-        args.extend(["-p", password])
-    args.extend([str(input_path), str(output_path)])
+    _ = snow_path
+    raw = extract_snow_native(input_path.read_bytes())
+    payload = _unpack_snow_payload(raw, password=password, compress=compress)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    completed = _run_tool(args)
-    if completed.returncode != 0:
-        raise ValueError(_tool_error(completed))
+    output_path.write_bytes(payload)
     return SnowResult(
-        operation="text.snow.extract",
+        operation="text.snow.extract-native",
         input_path=str(input_path),
         output_path=str(output_path),
         output_paths=[str(output_path)],
-        tool_path=tool,
-        backend="tool",
+        tool_path="python",
+        backend="native",
         line_length=0,
         password_used=password is not None,
         compressed=compress,
-        payload_bytes=output_path.stat().st_size if output_path.exists() else 0,
-        written_bytes=output_path.stat().st_size if output_path.exists() else 0,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
+        payload_bytes=len(payload),
+        written_bytes=len(payload),
     )
 
 
@@ -416,25 +362,76 @@ def _load_payload(*, payload_path: Path | None, text: str | None) -> bytes:
     return text.encode("utf-8")
 
 
-def _resolve_tool(configured: Path | None) -> str:
-    if configured is not None:
-        if not configured.is_file():
-            raise FileNotFoundError(f"snow/stegsnow 不存在：{configured}")
-        return str(configured)
-    for name in ("stegsnow", "snow", "SNOW.EXE"):
-        found = shutil.which(name)
-        if found is not None:
-            return found
-    raise FileNotFoundError("找不到 stegsnow/snow；请安装 stegsnow 或用 --snow 指定可执行文件")
+def _pack_snow_payload(payload: bytes, *, password: str | None, compress: bool) -> bytes:
+    flags = 0
+    body = payload
+    if compress:
+        body = zlib.compress(body, level=9)
+        flags |= SNOW_FLAG_COMPRESSED
+    if password is not None:
+        salt = hashlib.sha256(
+            b"oh-my-misc:text-snow:salt\x00" + password.encode("utf-8") + payload
+        ).digest()[:SNOW_SALT_BYTES]
+        body = _snow_crypt(body, password=password, salt=salt)
+        flags |= SNOW_FLAG_ENCRYPTED
+        mac = _snow_mac(flags, salt, body, password=password)
+    elif compress:
+        salt = b"\x00" * SNOW_SALT_BYTES
+        mac = b"\x00" * SNOW_MAC_BYTES
+    else:
+        return payload
+    return (
+        SNOW_PROTECTED_MAGIC
+        + bytes([flags])
+        + len(payload).to_bytes(8, "big")
+        + salt
+        + mac
+        + body
+    )
 
 
-def _run_tool(args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, text=True, capture_output=True, check=False)
+def _unpack_snow_payload(raw: bytes, *, password: str | None, compress: bool) -> bytes:
+    _ = compress
+    if not raw.startswith(SNOW_PROTECTED_MAGIC):
+        return raw
+    header_size = 8 + 1 + 8 + SNOW_SALT_BYTES + SNOW_MAC_BYTES
+    if len(raw) < header_size:
+        raise ValueError("SNOW protected payload 头部不完整")
+    flags = raw[8]
+    expected_size = int.from_bytes(raw[9:17], "big")
+    salt = raw[17 : 17 + SNOW_SALT_BYTES]
+    mac_start = 17 + SNOW_SALT_BYTES
+    stored_mac = raw[mac_start : mac_start + SNOW_MAC_BYTES]
+    body = raw[mac_start + SNOW_MAC_BYTES :]
+    if flags & ~(SNOW_FLAG_COMPRESSED | SNOW_FLAG_ENCRYPTED):
+        raise ValueError(f"SNOW protected payload 标志位异常：0x{flags:02x}")
+    if flags & SNOW_FLAG_ENCRYPTED:
+        if password is None:
+            raise ValueError("SNOW protected payload 需要 password")
+        expected_mac = _snow_mac(flags, salt, body, password=password)
+        if not hmac.compare_digest(stored_mac, expected_mac):
+            raise ValueError("SNOW protected payload password 校验失败")
+        body = _snow_crypt(body, password=password, salt=salt)
+    if flags & SNOW_FLAG_COMPRESSED:
+        body = zlib.decompress(body)
+    if len(body) != expected_size:
+        raise ValueError(f"SNOW protected payload 长度异常：{len(body)} != {expected_size}")
+    return body
 
 
-def _tool_error(completed: subprocess.CompletedProcess[str]) -> str:
-    detail = (completed.stderr or completed.stdout or "").strip()
-    return f"stegsnow 执行失败，退出码 {completed.returncode}" + (f"：{detail}" if detail else "")
+def _snow_crypt(data: bytes, *, password: str, salt: bytes) -> bytes:
+    key = hashlib.sha256(b"oh-my-misc:text-snow:key\x00" + salt + password.encode("utf-8")).digest()
+    output = bytearray()
+    counter = 0
+    while len(output) < len(data):
+        output.extend(hashlib.sha256(key + counter.to_bytes(8, "big")).digest())
+        counter += 1
+    return bytes(byte ^ stream for byte, stream in zip(data, output, strict=False))
+
+
+def _snow_mac(flags: int, salt: bytes, body: bytes, *, password: str) -> bytes:
+    key = hashlib.sha256(b"oh-my-misc:text-snow:mac\x00" + salt + password.encode("utf-8")).digest()
+    return hmac.new(key, bytes([flags]) + salt + body, hashlib.sha256).digest()[:SNOW_MAC_BYTES]
 
 
 def _validate_backend(backend: str) -> None:

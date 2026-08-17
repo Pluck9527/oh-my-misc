@@ -26,25 +26,32 @@ class JphsWrapperTest(unittest.TestCase):
     def test_extract_supports_empty_password(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            jpseek = _fake_jpseek(root)
+            cover = root / "cover.jpg"
             image = root / "stego.jpg"
+            payload = root / "payload.txt"
             output = root / "hidden.txt"
-            image.write_bytes(b"\xff\xd8fake-jphs\xff\xd9")
+            _write_jphs_cover(cover)
+            payload.write_text("flag{empty_jphs}", encoding="utf-8")
+            hide_jphs(cover, image, payload, password="", jphide_path=root / "ignored", backend="tool")
 
-            result = extract_jphs(image, output, jpseek_path=jpseek, backend="tool")
+            result = extract_jphs(image, output, jpseek_path=root / "ignored", backend="tool")
 
-            self.assertEqual(result.operation, "image.jphs.extract")
+            self.assertEqual(result.operation, "image.jphs.extract-python")
+            self.assertEqual(result.tool_path, "python")
             self.assertEqual(result.found_password, None)
             self.assertEqual(output.read_text(encoding="utf-8"), "flag{empty_jphs}")
 
     def test_extract_cli_accepts_custom_wordlist(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            jpseek = _fake_jpseek(root)
+            cover = root / "cover.jpg"
             image = root / "stego.jpg"
+            embedded = root / "payload.txt"
             wordlist = root / "words.txt"
             output = root / "hidden.txt"
-            image.write_bytes(b"\xff\xd8fake-jphs\xff\xd9")
+            _write_jphs_cover(cover)
+            embedded.write_text("flag{secret_jphs}", encoding="utf-8")
+            hide_jphs(cover, image, embedded, password="secret")
             wordlist.write_text("bad\nsecret\n", encoding="utf-8")
 
             stdout = io.StringIO()
@@ -62,8 +69,6 @@ class JphsWrapperTest(unittest.TestCase):
                         "flag{",
                         "--backend",
                         "tool",
-                        "--jpseek",
-                        str(jpseek),
                         "--output",
                         str(output),
                         "--json",
@@ -72,7 +77,8 @@ class JphsWrapperTest(unittest.TestCase):
             payload = json.loads(stdout.getvalue())
 
             self.assertEqual(exit_code, 0)
-            self.assertEqual(payload["operation"], "image.jphs.brute")
+            self.assertEqual(payload["operation"], "image.jphs.brute-python")
+            self.assertEqual(payload["tool_path"], "python")
             self.assertEqual(payload["found_password"], "secret")
             self.assertEqual(payload["attempts"], 2)
             self.assertEqual(output.read_text(encoding="utf-8"), "flag{secret_jphs}")
@@ -80,48 +86,78 @@ class JphsWrapperTest(unittest.TestCase):
     def test_brute_tries_empty_password_first_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            jpseek = _fake_jpseek(root)
+            cover = root / "cover.jpg"
             image = root / "stego.jpg"
+            embedded = root / "payload.txt"
             wordlist = root / "words.txt"
             output = root / "hidden.txt"
-            image.write_bytes(b"\xff\xd8fake-jphs\xff\xd9")
+            _write_jphs_cover(cover)
+            embedded.write_text("flag{empty_jphs}", encoding="utf-8")
+            hide_jphs(cover, image, embedded, password="")
             wordlist.write_text("secret\n", encoding="utf-8")
 
-            result = brute_jphs(image, wordlist, output, jpseek_path=jpseek, contains=b"empty", backend="tool")
+            result = brute_jphs(
+                image,
+                wordlist,
+                output,
+                jpseek_path=root / "ignored-jpseek",
+                contains=b"empty",
+                backend="tool",
+            )
 
+            self.assertEqual(result.operation, "image.jphs.brute-python")
+            self.assertEqual(result.tool_path, "python")
             self.assertEqual(result.found_password, "")
             self.assertEqual(result.attempts, 1)
             self.assertEqual(output.read_text(encoding="utf-8"), "flag{empty_jphs}")
 
-    def test_hide_wraps_jphide(self) -> None:
+    def test_hide_tool_alias_uses_python_backend(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            jphide = _fake_jphide(root)
             cover = root / "cover.jpg"
             payload = root / "payload.bin"
             stego = root / "stego.jpg"
-            cover.write_bytes(b"\xff\xd8cover\xff\xd9")
+            output = root / "out.bin"
+            _write_jphs_cover(cover)
             payload.write_bytes(b"secret-data")
 
-            result = hide_jphs(cover, stego, payload, password="pw", jphide_path=jphide, backend="tool")
+            result = hide_jphs(
+                cover,
+                stego,
+                payload,
+                password="pass",
+                jphide_path=root / "ignored-jphide",
+                backend="tool",
+            )
+            extract_jphs(stego, output, password="pass")
 
-            self.assertEqual(result.operation, "image.jphs.hide")
+            self.assertEqual(result.operation, "image.jphs.hide-python")
+            self.assertEqual(result.tool_path, "python")
             self.assertTrue(result.password_used)
-            self.assertIn(b"secret-data", stego.read_bytes())
+            self.assertEqual(output.read_bytes(), b"secret-data")
 
-    def test_jphs05_exe_can_run_through_wine_wrapper(self) -> None:
+    def test_jphs05_path_args_route_to_python_backend(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            jpseek = _fake_jpseek(root, name="jpseek.exe")
-            wine = _fake_wine(root)
+            cover = root / "cover.jpg"
             image = root / "stego.jpg"
+            embedded = root / "payload.txt"
             output = root / "hidden.txt"
-            image.write_bytes(b"\xff\xd8fake-jphs05\xff\xd9")
+            _write_jphs_cover(cover)
+            embedded.write_text("flag{secret_jphs}", encoding="utf-8")
+            hide_jphs(cover, image, embedded, password="secret")
 
-            result = extract_jphs(image, output, password="secret", jpseek_path=jpseek, wine_path=wine, backend="tool")
+            result = extract_jphs(
+                image,
+                output,
+                password="secret",
+                jpseek_path=root / "jpseek.exe",
+                wine_path=root / "wine",
+                backend="tool",
+            )
 
-            self.assertEqual(result.tool_path, str(jpseek))
-            self.assertEqual(result.runner_path, str(wine))
+            self.assertEqual(result.tool_path, "python")
+            self.assertEqual(result.runner_path, None)
             self.assertEqual(result.found_password, "secret")
             self.assertEqual(output.read_text(encoding="utf-8"), "flag{secret_jphs}")
 
@@ -163,40 +199,8 @@ class JphsWrapperTest(unittest.TestCase):
         self.assertEqual(extracted, b"flag{embed}")
 
 
-def _fake_jpseek(root: Path, *, name: str = "jpseek") -> Path:
-    script = root / name
-    script.write_text(
-        """#!/usr/bin/env python3
-import sys
-password = sys.stdin.readline().rstrip("\\n")
-out = sys.argv[2]
-if password == "":
-    open(out, "wb").write(b"flag{empty_jphs}")
-    sys.exit(0)
-if password == "secret":
-    open(out, "wb").write(b"flag{secret_jphs}")
-    sys.exit(0)
-sys.stderr.write("Wrong pass phrase\\n")
-sys.exit(3)
-""",
-        encoding="utf-8",
-    )
-    script.chmod(script.stat().st_mode | 0o111)
-    return script
-
-
-def _fake_wine(root: Path) -> Path:
-    script = root / "wine"
-    script.write_text(
-        """#!/usr/bin/env python3
-import os
-import sys
-os.execv(sys.argv[1], sys.argv[1:])
-""",
-        encoding="utf-8",
-    )
-    script.chmod(script.stat().st_mode | 0o111)
-    return script
+def _write_jphs_cover(path: Path) -> None:
+    Image.new("RGB", (96, 96), (90, 140, 190)).save(path, "JPEG", quality=90)
 
 
 def _synthetic_coefficients() -> list[list[list[int]]]:
@@ -258,24 +262,6 @@ def _merge_synthetic_word(word: int, bit: int, mode: int) -> int:
     if word > 0:
         return (word & ~1) | bit
     return -(((-word) & ~1) | bit)
-
-
-def _fake_jphide(root: Path) -> Path:
-    script = root / "jphide"
-    script.write_text(
-        """#!/usr/bin/env python3
-import sys
-password = sys.stdin.readline().rstrip("\\n")
-sys.stdin.readline()
-cover, out, payload = sys.argv[1], sys.argv[2], sys.argv[3]
-open(out, "wb").write(open(cover, "rb").read() + b"|" + password.encode() + b"|" + open(payload, "rb").read())
-sys.exit(0)
-""",
-        encoding="utf-8",
-    )
-    script.chmod(script.stat().st_mode | 0o111)
-    return script
-
 
 if __name__ == "__main__":
     unittest.main()

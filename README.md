@@ -43,6 +43,10 @@ omm image cloacked-pixel extract stego.png --password 'p@ss' -o secret.zip
 omm image cloacked-pixel extract stego.png --wordlist passwords.txt --contains 'flag{' -o secret.bin
 omm image cloacked-pixel brute stego.png --wordlist passwords.txt --contains 'flag{' -o secret.bin
 omm image cloacked-pixel analyse stego.png --json
+omm image image-steganography hide cover.png --text 'flag{demo}' -o stego.png
+omm image image-steganography extract stego.png -o payload.bin
+omm image image-steganography hide cover.png --mode difference --payload secret.bin -o diff.png
+omm image image-steganography extract diff.png --mode difference --reference cover.png -o secret.bin
 omm image stegpy extract stego.png --password 'p@ss' -o payload.bin
 omm image stegpy extract stego.png --wordlist passwords.txt --contains 'flag{' -o payload.bin
 omm stego steghide extract stego.jpg -p '' -o hidden.bin
@@ -77,7 +81,7 @@ omm text snow extract stego.txt -o flag.txt
 omm text snow capacity cover.txt --line-length 72 --json
 omm text spammimic encode --text 'flag{demo}' -o spam.txt
 omm text spammimic decode spam.txt -o flag.txt
-omm text spammimic decode official-spam.txt --backend remote -o flag.txt
+omm text spammimic decode spam.txt --backend remote -o flag.txt
 omm text spammimic decode spam.txt --wordlist passwords.txt --contains 'flag{' -o flag.txt
 omm text zwc inspect suspect.txt --json
 omm text zwc extract suspect.txt --chars U+200B,U+200C -o flag.txt
@@ -93,6 +97,10 @@ omm zip timestamp extract challenge.zip --include .txt --base 1737276000 --offse
 omm zip timestamp extract out/ --source dir --sort numeric --base 1737276000 -o hidden.bin
 omm zip ntfs-stream extract challenge.rar -o ads_out/
 omm stego oursecret extract carrier.bin -o oursecret_out/
+omm stego deegger inspect carrier.bin --json
+omm stego deegger extract carrier.bin -o hidden.bin
+omm stego deegger extract-files carrier.bin -o hidden_files/
+omm stego deegger hide carrier.jpg --payload secret.txt -o stego.jpg
 omm stego silenteye extract carrier.wav --password silenteye -o hidden.bin
 omm stego silenteye hide carrier.bmp --text 'flag{demo}' --password silenteye -o stego.bmp
 omm audio sstv inspect flag.wav --json
@@ -111,7 +119,7 @@ omm audio midi-qr events.txt -o qr.png --midi-output recovered.mid
 omm audio midi-qr song.mid -o qr.png --source midi
 omm audio mp3stego extract sound.mp3 -p pass -o hidden.txt
 omm audio mp3stego brute sound.mp3 --wordlist passwords.txt --contains 'flag{' -o hidden.txt
-omm audio mp3stego encode sound.wav --payload data.txt -p pass -o sound.mp3
+omm audio mp3stego encode cover.mp3 --payload data.txt -p pass -o sound.mp3
 omm audio mp3-field extract suspect.mp3 --field copyright -o hidden.bin
 omm audio mp3-field extract suspect.mp3 --start 0x0F05A4 --end 0xC125A3 --field copyright --base-frame-size 1044 -o flag.txt
 omm audio mp3-field scan suspect.mp3 -o mp3-field-candidates/
@@ -147,7 +155,7 @@ omm audio sstv decode noisy.wav --skip 1.5 --mode robot36 --max-lines 80 -o prev
 
 ## Amateur radio AFSK1200 / AX.25 / APRS decoding
 
-`omm audio ham` implements the common CTF workflow from WAV amateur-radio data to decoded packet text. The native backend reads PCM WAV directly, mixes stereo to mono, resamples for demodulation, detects Bell 202 AFSK1200 mark/space tones, applies NRZI decoding, splits HDLC `0x7e` frames, removes bit stuffing, verifies AX.25 FCS, and renders APRS UI-frame text. A compatibility backend can call `multimon-ng` after exporting signed 16-bit raw audio, matching the usual `sox ... -t raw` plus `multimon-ng -t raw -a AFSK1200` command path.
+`omm audio ham` implements the common CTF workflow from WAV amateur-radio data to decoded packet text. The native backend reads PCM WAV directly, mixes stereo to mono, resamples for demodulation, detects Bell 202 AFSK1200 mark/space tones, applies NRZI decoding, splits HDLC `0x7e` frames, removes bit stuffing, verifies AX.25 FCS, and renders APRS UI-frame text. The legacy backend spellings `auto` and `multimon` are accepted for CLI compatibility and route to the same Python implementation.
 
 ```bash
 # Native Python decoder for the article's latlong.wav style challenge.
@@ -156,8 +164,8 @@ omm audio ham decode latlong.wav --mode afsk1200 --output aprs.txt
 # Inspect packet count and APRS messages without writing output.
 omm audio ham inspect latlong.wav --json
 
-# Export raw and use multimon-ng when it is installed.
-omm audio ham decode latlong.wav --backend multimon --raw-output latlong.raw -o aprs.txt
+# Export raw while decoding natively.
+omm audio ham decode latlong.wav --backend auto --raw-output latlong.raw -o aprs.txt
 
 # Generate a local AX.25/APRS AFSK1200 sample for tests or demos.
 omm audio ham encode --source N0CALL --destination APRS --text 'flag{demo}' -o aprs.wav
@@ -247,11 +255,14 @@ omm audio midi-qr song.mid -o qr.png --source midi --json
 parity of each MP3 Layer III granule/channel `part2_3_length` side-info field;
 selection is driven by the passphrase, so an empty password is also supported.
 
-The native extractor parses MP3 frames directly, follows the original
-SHA-1-based bit selector, reads the little-endian length prefix, then performs
-the MP3Stego 3DES-CBC decrypt + gzip decompress stage. Encoding still calls the
-upstream `Encode.exe`/`encode` binary because MP3Stego embeds during MP3
-compression.
+The native implementation is a Python port of the MP3Stego `StegoLib` state
+machine: `CompressEncryptFile` is represented by deterministic gzip + 3DES-CBC,
+`StegoOpenEmbeddedText`/`StegoGetNextBit` streams the little-endian length header
+then encrypted bytes LSB-first, and `StegoCreateEmbeddedText`/`SaveHiddenBit`
+rebuilds that stream while the SHA-1 PRNG selects carrier fields. Native encoding
+patches only the selected Layer III `part2_3_length` parity bits in an existing
+MP3 carrier; the old WAV-shaped command path now builds a deterministic local
+MPEG-frame carrier instead of invoking `Encode.exe`.
 
 ```bash
 # Inspect frame count, selectable bits and embedded encrypted payload length.
@@ -266,11 +277,11 @@ omm audio mp3stego brute sound.mp3 \
   --wordlist passwords.txt --contains 'flag{' \
   -o hidden.txt
 
-# Compatibility path for creating samples with the original encoder.
-omm audio mp3stego encode sound.wav \
+# Native carrier patching / fixture generation.
+omm audio mp3stego encode cover.mp3 \
   --payload data.txt -p pass \
-  --encoder /path/to/Encode.exe \
   -o sound.mp3
+omm audio mp3stego encode sound.wav --payload data.txt -p pass -o fixture.mp3
 ```
 
 ## MP3 frame-header field steganography
@@ -304,37 +315,38 @@ Use `--format bits` when you want the raw ASCII `0`/`1` stream instead of groupe
 ## Audio Lyra codec
 
 `omm audio lyra` handles Google Lyra low-bitrate speech-compression challenges.
-The `.lyra` files produced by Google's CLI examples are raw packet streams, so
-they do not carry a self-describing header; the native `inspect` command reports
-packet-size candidates for the supported 3200/6000/9200 bps modes.
+The `.lyra` files produced by Google's sample tools are raw packet streams, so
+they do not carry a self-describing header; `inspect` reports packet-size
+candidates for the supported 3200/6000/9200 bps modes.
 
-Encoding and decoding use Google's Apache-2.0 `encoder_main` and `decoder_main`
-binaries from `google/lyra`, preserving the upstream neural codec implementation
-and model-weight compatibility. Build them once in a Lyra checkout:
+The project now vendors Google's Apache-2.0 Lyra 1.3.2 source under
+`src/oh_my_misc/_vendor/google_lyra` and calls it through a small C ABI wrapper
+loaded by Python `ctypes`. Encode/decode call the bundled wrapper directly instead
+of spawning standalone command-line programs. Build the bundled wrapper once when
+you need speech reconstruction:
 
 ```bash
-bazel build -c opt lyra/cli_example:encoder_main
-bazel build -c opt lyra/cli_example:decoder_main
+cd src/oh_my_misc/_vendor/google_lyra
+bazel build -c opt //omm_native:libomm_lyra_native.so
 ```
 
-Then pass the binary paths, or expose `encoder_main`/`decoder_main` on `PATH`:
+`omm` searches the bundled Bazel output automatically. You can also pass
+`--library /path/to/libomm_lyra_native.so` or set `OMM_LYRA_LIBRARY`. The default
+model path is the bundled `lyra/model_coeffs` directory; override with
+`--model-path` or `OMM_LYRA_MODEL_PATH`.
 
 ```bash
 # Inspect likely bitrate candidates from raw packet length.
 omm audio lyra inspect challenge.lyra --json
 omm audio lyra inspect challenge.lyra --bitrate 3200
 
-# Decode a CTF-provided .lyra stream to WAV.
+# Decode a CTF-provided .lyra stream to WAV through the native wrapper.
 omm audio lyra decode challenge.lyra \
-  --decoder /path/to/google/lyra/bazel-bin/lyra/cli_example/decoder_main \
-  --model-path /path/to/google/lyra/lyra/model_coeffs \
   --bitrate 3200 --sample-rate 16000 \
   -o decoded.wav
 
-# Encode a WAV into the same raw .lyra stream format.
+# Encode a WAV into the same raw .lyra stream format through the native wrapper.
 omm audio lyra encode speech.wav \
-  --encoder /path/to/google/lyra/bazel-bin/lyra/cli_example/encoder_main \
-  --model-path /path/to/google/lyra/lyra/model_coeffs \
   --bitrate 3200 \
   -o speech.lyra
 ```
@@ -561,6 +573,10 @@ omm stego stegpy extract stego.png --wordlist passwords.txt --contains 'flag{' -
 omm stego stegpy extract stego.wav --password 'p@ss' -o payload.bin
 omm stego oursecret extract carrier.bin --password 'pw' -o hidden/
 omm stego oursecret hide carrier.bmp --payload secret.txt --password 'pw' --mode lsb -o stego.bmp
+omm stego deegger inspect carrier.bin --json
+omm stego deegger extract carrier.bin -o hidden.bin
+omm stego deegger extract-files carrier.bin -o hidden_files/
+omm stego deegger hide carrier.jpg --payload secret.txt -o stego.jpg
 omm stego deepsound analyze carrier.wav --json
 omm stego deepsound extract carrier.wav -o hidden/
 ```
@@ -584,6 +600,30 @@ omm stego silenteye hide cover.bmp --payload secret.zip --password silenteye -o 
 `--carrier auto` maps WAV files to the WAV module and image files to the BMP-style module. The BMP-style writer outputs BMP because that is the lossless format used by SilentEye's BMP module.
 
 
+`omm stego deegger` implements the DeEgger Embedder 1.2.1.1 format recovered
+from the provided MSI. DeEgger is an arbitrary-carrier append format:
+`host || BREAK_START || bitwise-not(payload) || BREAK_STOP ||
+bitwise-not(extension + NUL)`, where the recovered markers are
+`&)($#^@*#^(\0` and `$#&)*@&(#^*\0`. Multi-Hidden mode stores multiple files as
+a Microsoft Cabinet payload with extension `.1`; extraction is pure Python for
+uncompressed and MSZIP CAB blocks, and native hiding can create compatible
+uncompressed CAB payloads.
+
+```bash
+# Check for DeEgger markers and the hidden extension.
+omm stego deegger inspect suspect.bin --json
+
+# Extract one hidden file; if the output has no suffix, the recovered suffix is used.
+omm stego deegger extract suspect.bin --output hidden
+
+# Extract and unpack Multi-Hidden CAB payloads.
+omm stego deegger extract-files suspect.bin --output out/
+
+# Build compatible arbitrary-carrier samples.
+omm stego deegger hide carrier.jpg --payload secret.txt --output stego.jpg
+omm stego deegger hide carrier.bin --payload a.txt --payload b.dat -o multi.bin
+```
+
 `omm stego deepsound` is a native Python implementation of the common DeepSound 2.x WAV CTF path. It scans the WAV `data` chunk for the normal-quality encoded `DSCF` header, supports the official quality factors (`low=2`, `normal=4`, `high=8`), extracts unencrypted/no-password `DSCF` file records, and reports the SHA1 password verifier found in encrypted headers for dictionary workflows. The encoder writes the no-password layout used by the extractor and keeps the original RIFF chunks intact except for carrier bytes touched by the DeepSound bit/nibble packing.
 
 ```bash
@@ -599,7 +639,7 @@ omm stego deepsound hide cover.wav --payload secret.txt --quality normal -o steg
 omm stego deepsound hide cover.wav --text 'flag{demo}' --text-name flag.txt -o stego.wav
 ```
 
-`omm stego oursecret` implements the OurSecret-style format recovered from the provided script: arbitrary-file append mode (`carrier || Blowfish-ECB(zip) || 28-byte HI trailer`) and 24-bit BMP LSB mode. The password is checked against `MD5(password) ^ 0x08` in the trailer; the payload cipher key is the fixed OurSecret Blowfish key, so extraction can also run without a password when you only need the embedded ZIP.
+`omm stego oursecret` implements the OurSecret-style format recovered from the provided script and verified against `OurSecret.exe` 2.5.5.0: arbitrary-file append mode (`carrier || 40-byte OurSecret EOF signature || Blowfish-ECB(zip) || 28-byte HI trailer`) and 24-bit BMP LSB mode. The password is checked against `MD5(password) ^ 0x08` in the trailer; the payload cipher key is the fixed OurSecret Blowfish key, so extraction can also run without a password when you only need the embedded ZIP. Existing legacy samples without the 40-byte signature are still accepted, and `inspect` also reports signature-only carrier hits.
 
 ```bash
 # Check HI trailer / BMP LSB marker
@@ -613,6 +653,7 @@ omm stego oursecret extract suspect.bin --password 'pass123' -o out/
 
 # Build compatible carriers
 omm stego oursecret hide carrier.bin --payload secret.txt --password 'pass123' -o stego.bin
+omm stego oursecret hide carrier.bin --payload secret.txt --no-signature -o legacy.bin
 omm stego oursecret hide carrier.bmp --text 'flag{demo}' --mode lsb -o stego.bmp
 ```
 
@@ -639,7 +680,7 @@ omm text whitespace encode --payload secret.bin --output secret.ws
 
 `run` accepts `--input` or `--input-file` for programs that use Whitespace read instructions, and `--max-steps` prevents accidental infinite loops. `show --style unicode` uses visible symbols (`·`, `⇥`, `↵`) instead of `S/T/L`.
 
-SNOW/stegsnow hides ordinary bytes in trailing spaces and tabs at the end of text lines. The native backend implements the classic uncompressed, no-password format (start tab, 3-bit space counts separated by tabs) and keeps the visible text unchanged after stripping line-end whitespace. Password mode (`-p`) and built-in Huffman compression (`-C`) are delegated to an installed `stegsnow`/`snow` binary so they stay compatible with Matthew Kwan's tool.
+SNOW/stegsnow hides ordinary bytes in trailing spaces and tabs at the end of text lines. The Python backend implements the classic start-tab plus 3-bit space-count line-end encoding and keeps the visible text unchanged after stripping line-end whitespace. Password mode (`-p`) and compression (`-C`) are handled in-process with a native protected payload wrapper, so `auto`, `native` and the legacy `tool` backend spelling all stay inside Python.
 
 ```bash
 # Native no-password SNOW hide/extract
@@ -649,21 +690,21 @@ omm text snow extract stego.txt --output recovered.bin
 # Alias and capacity check
 omm text stegsnow capacity cover.txt --line-length 72 --json
 
-# Compatible tool backend for -C / -p
-omm text snow hide cover.txt --text 'flag{demo}' -C -p 'pw' --backend tool --output stego.txt
-omm text snow extract stego.txt -C -p 'pw' --backend tool --output flag.txt
+# Native -C / -p
+omm text snow hide cover.txt --text 'flag{demo}' -C -p 'pw' --backend native --output stego.txt
+omm text snow extract stego.txt -C -p 'pw' --backend native --output flag.txt
 ```
 
 
-SpamMimic-style linguistic steganography turns a short payload into junk-mail prose. The native backend is deterministic and offline: it uses a spam grammar with reversible production choices, supports a `space` variant using trailing spaces/tabs, and can wrap the payload with a password-derived stream for CTF dictionary attacks. The remote backend calls the live [spammimic.com](https://www.spammimic.com/) CGI endpoints for official SpamMimic samples generated by that site.
+SpamMimic-style linguistic steganography turns a short payload into junk-mail prose. The native backend is deterministic and offline: it uses a spam grammar with reversible production choices, supports a `space` variant using trailing spaces/tabs, and can wrap the payload with a password-derived stream for CTF dictionary attacks. The legacy `remote` and `auto` backend spellings are accepted for CLI compatibility and route to the same Python implementation.
 
 ```bash
 # Offline native spam grammar
 omm text spammimic encode --text 'flag{demo}' --output spam.txt
 omm text spammimic decode spam.txt --backend native --output flag.txt
 
-# Decode an official spammimic.com sample through the compatible remote endpoint
-omm text spammimic decode official-spam.txt --backend remote --output flag.txt
+# Legacy backend spelling, still native Python
+omm text spammimic decode spam.txt --backend remote --output flag.txt
 
 # Password and custom dictionary workflows
 omm text spammimic encode --text 'flag{demo}' -p 'pw' --output spam.txt
@@ -707,7 +748,7 @@ omm text cloakify cloak secret.zip --cipher passwd.txt --output cloaked.txt
 
 ## Top-level zip namespace, password cracking and CRC32 brute force
 
-`omm zip` is for archive-focused CTF workflows. `omm zip crack` performs fast password cracking for encrypted archives. For classic ZIP/ZipCrypto it uses a native verifier that decrypts only the 12-byte encryption header before doing a full CRC check, so large dictionaries are filtered quickly. Use `--backend 7z` when the file is RAR/7z/WinZip AES and a local `7z`/`7zz` binary is available.
+`omm zip` is for archive-focused CTF workflows. `omm zip crack` performs fast password cracking for encrypted archives. For classic ZIP/ZipCrypto it uses a native verifier that decrypts only the 12-byte encryption header before doing a full CRC check, so large dictionaries are filtered quickly. 7z archives are checked and extracted natively through py7zr; no `7z`/`7zz` executable is required.
 
 ```bash
 # Fast custom dictionary attack; one password per line
@@ -716,11 +757,11 @@ omm zip crack encrypted.zip --wordlist passwords.txt --workers 0 --json
 # Generate numeric PIN candidates without a dictionary
 omm zip crack encrypted.zip --charset digits --min-length 1 --max-length 6
 
-# Try broader formats via 7-Zip and extract after a hit
+# Crack a 7z archive through the native py7zr backend and extract after a hit
 omm zip crack secret.7z --backend 7z --wordlist passwords.txt --output unpacked/
 ```
 
-`omm zip plaintext` wraps bkcrack for ZipCrypto known-plaintext attacks. Provide a known plaintext file, or a ZIP containing the matching plaintext entry, to recover the three internal keys. Then export a passwordless ZIP, change the password, or ask bkcrack to recover an equivalent original password.
+`omm zip plaintext` is a native Python implementation of the bkcrack-style ZipCrypto known-plaintext workflow. Provide a known plaintext file, or a ZIP containing the matching plaintext entry, to recover the three internal keys. Then export a passwordless ZIP, change the password, or enumerate an equivalent original password from known keys.
 
 ```bash
 # List built-in classic CTF known-plaintext presets
@@ -789,7 +830,11 @@ omm zip timestamp extract out/ --source dir --sort numeric --base 1737276000 -o 
 omm zip timestamp embed cover.zip --text 'flag{demo}' --base 1737276000 -o time.zip
 ```
 
-`omm zip ntfs-stream` extracts NTFS Alternate Data Streams saved inside RAR5 archives, the RAR-side form used by WinRAR's "Save file streams" option. It scans service headers named `STM`, maps each `host:stream` pair to a portable sidecar file under `<host>.streams/`, and writes `ads_manifest.json` so the original stream path remains visible on non-NTFS systems.
+`omm zip ntfs-stream` extracts NTFS Alternate Data Streams saved inside RAR4/RAR5
+archives, the RAR-side form used by WinRAR's "Save file streams" option. It
+scans service headers named `STM`, maps each `host:stream` pair to a portable
+sidecar file under `<host>.streams/`, and writes `ads_manifest.json` so the
+original stream path remains visible on non-NTFS systems.
 
 ```bash
 # List hidden NTFS streams without extracting
@@ -821,13 +866,13 @@ omm zip crc reverse --crc 0x7c2df918 --length 4 --charset all --output candidate
 
 When there is one candidate, `--output` is written as a file. When multiple candidates are found, `--output` is treated as a directory and receives `candidate_000.bin`, `candidate_001.bin`, etc. `--max-prefixes` caps the length-4 prefix enumeration for large searches.
 
-`omm zip nested` recursively unpacks archive dolls. Native handlers cover ZIP, TAR, tar.gz, tar.bz2, tar.xz, gzip, bzip2 and xz; 7z/RAR are delegated to an installed `7z`/`7zz`/`7za`. Each layer is written into a numbered directory, so intermediate archives are kept for review.
+`omm zip nested` recursively unpacks archive dolls. Native handlers cover ZIP, TAR, tar.gz, tar.bz2, tar.xz, gzip, bzip2, xz and 7z through py7zr. Each layer is written into a numbered directory, so intermediate archives are kept for review.
 
 ```bash
 # Auto-detect by signature/format and keep extracting nested archives
 omm zip nested flag.zip --output unrolled/
 
-# Mixed chain with limits and optional password for zip/7z/rar
+# Mixed chain with limits and optional password for zip/7z
 omm zip unpack shell9999.tar.gz --output unrolled/ --max-depth 200 --password 'pw'
 
 # JSON report includes every layer, archive type and final files
@@ -836,13 +881,13 @@ omm zip nested flag.zip -o unrolled/ --json
 
 ## steghide empty-password and dictionary extraction
 
-`omm stego steghide` now has an in-process native backend before the external-tool fallback. The native backend extracts steghide 0.5.x payloads from JPEG DCT, BMP and PCM WAV/AU carriers, including the common empty-password case and AES/Rijndael-128-CBC payloads. `--backend auto` is the default: it tries the built-in backend first, then calls `steghide extract -sf INPUT -xf OUTPUT -p PASSWORD -f` when a carrier/cipher still needs the upstream tool.
+`omm stego steghide` uses an in-process native backend. The native backend extracts steghide 0.5.x payloads from JPEG DCT, BMP and PCM WAV/AU carriers, including the common empty-password case and AES/Rijndael-128-CBC payloads. `--backend auto`, `--backend native` and the legacy `--backend tool` spelling all route to the Python implementation.
 
 ```bash
 # Empty-password extraction through the built-in backend when possible.
 omm stego steghide extract stego.jpg --password '' --output hidden.bin
 
-# Force native only: useful when steghide is not installed.
+# Explicit native selector.
 omm stego steghide extract stego.wav --backend native -p '' -o hidden.bin
 
 # Dictionary mode tries empty password first unless --no-empty is set.
@@ -850,13 +895,40 @@ omm stego steghide brute stego.wav \
   --wordlist passwords.txt --contains 'flag{' \
   --backend auto --output hidden.txt
 
-# Force the official executable for unusual ciphers or strict tool parity.
+# Legacy backend spelling, still native Python.
 omm stego steghide extract stego.bmp \
-  --backend tool --steghide /path/to/steghide \
+  --backend tool \
   --password pass --output hidden.bin
 ```
 
-The older `omm image steghide ...` spelling remains available. Use `--steghide /path/to/steghide` when forcing the tool backend and the binary is not on `PATH`.
+The older `omm image steghide ...` spelling remains available.
+
+## Image Steganography 1.4.5.2 native mode
+
+`omm image image-steganography` implements the VB.NET tool recovered from the
+attached `Image Steganography 1.4.5.2 Setup.zip`. The native backend matches the
+two engine modes: `enlarge` stores data in 2× enlarged 2x2 pixel blocks, and
+`difference` stores one byte per pixel as R/B channel deltas and needs the
+original image for extraction. Password mode mirrors the binary's
+AES-CBC/PKCS7 + PBKDF2-HMAC-SHA1 derivation with the 14-byte static salt found
+in `AESCryptByte`.
+
+```bash
+# Default Enlarge mode: output dimensions are doubled.
+omm image image-steganography hide cover.png --text 'flag{demo}' \
+  --password 'p@ss' --output stego.png
+omm image image-steganography extract stego.png --password 'p@ss' \
+  --output payload.bin
+
+# Difference mode: keep the original image and pass it back as --reference.
+omm image image-steganography hide cover.png --payload secret.bin \
+  --mode difference --output diff.png
+omm image image-steganography extract diff.png --mode difference \
+  --reference cover.png --output secret.bin
+
+# Aliases: image-steg, imgsteg, img-steg.
+omm image image-steg inspect stego.png --json
+```
 
 ## stegpy stegv3 LSB steganography
 
@@ -905,12 +977,12 @@ omm image outguess brute mmm.jpg \
   --wordlist passwords.txt --prefix 'PK' \
   --output hidden.zip
 
-# Create an OutGuess stego file through the installed executable
+# Create an OutGuess stego file
 omm image outguess hide cover.jpg --payload secret.zip \
   -k 'abc' --backend native --output stego.jpg
 ```
 
-`--backend auto` uses the native backend for PNM/PPM/PGM and baseline JPEG files. Use `--backend tool --outguess /path/to/outguess` when you need the upstream executable for unusual JPEG variants or exact CLI behavior. The tool backend invokes `outguess -k KEY -r INPUT OUTPUT` for extraction and `outguess -k KEY -d PAYLOAD INPUT OUTPUT` for embedding.
+`--backend auto`, `--backend native` and the legacy `--backend tool` spelling all route to the Python implementation for PNM/PPM/PGM and baseline JPEG files.
 
 ## jsteg JPEG DCT LSB steganography
 
@@ -1059,7 +1131,7 @@ Original/forked source:
 - [`h3xx/jphs`](https://github.com/h3xx/jphs)
 - [`thezakman/jphs`](https://github.com/thezakman/jphs)
 
-The default backend is now `python` for `hide`, `extract` and `brute`. The `tool` backend is still available when you need exact `jphide`/`jpseek` executable behavior, old `jphs05.exe` files through Wine, or unusual JPEG variants outside the built-in baseline sequential writer.
+The default backend is `python` for `hide`, `extract` and `brute`. The legacy `tool` and `auto` backend spellings are accepted for CLI compatibility and route to the same Python implementation.
 
 ```bash
 # Pure Python extract
@@ -1082,19 +1154,12 @@ omm image jphs hide cover.jpg --payload secret.zip \
   --password 'p@ss' \
   --output stego.jpg
 
-# Optional executable fallback
-omm image jphs extract suspect.jpg --backend tool --password '' \
-  --jpseek /path/to/jphs05/jpseek.exe \
-  --wine /opt/homebrew/bin/wine \
-  --output hidden.bin
-
-# Try Python first and fall back to the executable
+# Legacy backend spelling, still native Python
 omm image jphs extract suspect.jpg --backend auto --password 'p@ss' \
-  --jpseek /path/to/jpseek \
   --output hidden.bin
 ```
 
-Python backend limits: the JPEG must be 8-bit baseline sequential with three components and no DRI restart interval when writing. Passwords use the local Blowfish implementation path exposed through PyCryptodome, so normal JPHS passphrases work in the 4..56 byte Blowfish key range.
+Python backend notes: the JPEG must be 8-bit baseline sequential with three components and no DRI restart interval when writing. Passwords use the local Blowfish implementation path exposed through PyCryptodome; the empty passphrase path is mapped to the native zero-key compatibility path.
 
 ## PixelJihad empty-password steganography
 

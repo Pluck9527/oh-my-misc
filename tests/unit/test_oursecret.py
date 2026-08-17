@@ -8,6 +8,7 @@ import pytest
 
 from oh_my_misc.cli import main
 from oh_my_misc.oursecret import (
+    OURSECRET_EOF_SIGNATURE,
     check_trailer,
     extract_oursecret,
     hide_oursecret,
@@ -51,11 +52,17 @@ def test_oursecret_append_roundtrip(tmp_path: Path) -> None:
     assert trailer_info is not None
     assert trailer_info[1] == password_tag("pass123")
     assert hide_result.data_size == trailer_info[0]
+    assert (
+        stego.read_bytes()[len(b"carrier-data\n") : len(b"carrier-data\n") + 40]
+        == OURSECRET_EOF_SIGNATURE
+    )
+    assert hide_result.signature_offset == len(b"carrier-data\n")
 
     inspect_result = inspect_oursecret(stego)
     extract_result = extract_oursecret(stego, out_dir, password="pass123")
 
     assert inspect_result.mode == "append"
+    assert inspect_result.signature_offset == len(b"carrier-data\n")
     assert extract_result.password_verified is True
     assert (out_dir / "secret.txt").read_text(encoding="utf-8") == "flag{oursecret}\n"
 
@@ -73,6 +80,53 @@ def test_oursecret_extract_without_password_uses_fixed_cipher_key(tmp_path: Path
 
     assert result.password_verified is None
     assert (out_dir / "secret.txt").read_bytes() == b"open-without-password"
+
+
+def test_oursecret_append_legacy_no_signature_still_extracts(tmp_path: Path) -> None:
+    carrier = tmp_path / "carrier.bin"
+    payload = tmp_path / "secret.txt"
+    stego = tmp_path / "legacy.bin"
+    out_dir = tmp_path / "out"
+    carrier.write_bytes(b"legacy-carrier")
+    payload.write_bytes(b"legacy")
+
+    hide_result = hide_oursecret(
+        carrier,
+        stego,
+        payload_paths=[payload],
+        password="",
+        signature=False,
+    )
+    inspect_result = inspect_oursecret(stego)
+    extract_result = extract_oursecret(stego, out_dir)
+
+    assert hide_result.signature_offset is None
+    assert inspect_result.signature_offset is None
+    assert extract_result.password_verified is None
+    assert (out_dir / "secret.txt").read_bytes() == b"legacy"
+
+
+def test_oursecret_signature_only_scan(tmp_path: Path) -> None:
+    carrier = tmp_path / "signature-only.bin"
+    carrier.write_bytes(b"raw-carrier" + OURSECRET_EOF_SIGNATURE + b"opaque")
+
+    result = inspect_oursecret(carrier)
+
+    assert result.mode == "signature"
+    assert result.count == 1
+    assert result.signature_offset == len(b"raw-carrier")
+    assert result.entries[0]["kind"] == "oursecret-eof-signature"
+
+
+def test_oursecret_cli_signature_only_inspect(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    carrier = tmp_path / "signature-only.bin"
+    carrier.write_bytes(b"raw-carrier" + OURSECRET_EOF_SIGNATURE + b"opaque")
+
+    assert main(["stego", "oursecret", "inspect", str(carrier), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["mode"] == "signature"
+    assert payload["signature_offset"] == len(b"raw-carrier")
 
 
 def test_oursecret_wrong_password_rejected(tmp_path: Path) -> None:
